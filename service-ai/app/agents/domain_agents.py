@@ -172,23 +172,51 @@ def search_memory(context_id: str, query: str) -> str:
 
 # ── Agent definitions ─────────────────────────────────────────────────────────
 
-def build_research_agent(model: str) -> Agent:
-    """Construct and return the ResearchAgent."""
-    return Agent(
-        name="ResearchAgent",
-        handoff_description=(
-            "Specialist for web search, current events, factual lookups, "
-            "and deep research on any topic."
-        ),
-        instructions=(
-            "You are a research specialist. Use your web_search and deep_research "
-            "tools to find accurate, up-to-date information. "
-            "Always cite your sources and present findings clearly. "
-            "When research is complete, provide a comprehensive summary."
-        ),
-        tools=[web_search, deep_research],
-        model=model,
-    )
+def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
+    """
+    Construct and return the ResearchAgent.
+
+    Args:
+        model:       Model name for this agent.
+        mcp_servers: List of MCPServerStdio instances injected at runtime
+                     from MCPManager. Falls back to built-in mock tools
+                     when no MCP servers are configured.
+    """
+    # Use MCP servers when available; fall back to mock tools for dev/test
+    if mcp_servers:
+        return Agent(
+            name="ResearchAgent",
+            handoff_description=(
+                "Specialist for web search, current events, factual lookups, "
+                "and deep research on any topic."
+            ),
+            instructions=(
+                "You are a research specialist with access to Tavily's search and "
+                "extraction tools. Use tavily_search to find accurate, up-to-date "
+                "information and tavily_extract to pull detailed content from specific URLs. "
+                "Always cite your sources and present findings clearly. "
+                "When research is complete, provide a comprehensive summary."
+            ),
+            mcp_servers=mcp_servers,
+            model=model,
+        )
+    else:
+        # Fallback: built-in mock tools (no MCP configured)
+        return Agent(
+            name="ResearchAgent",
+            handoff_description=(
+                "Specialist for web search, current events, factual lookups, "
+                "and deep research on any topic."
+            ),
+            instructions=(
+                "You are a research specialist. Use your web_search and deep_research "
+                "tools to find accurate, up-to-date information. "
+                "Always cite your sources and present findings clearly. "
+                "When research is complete, provide a comprehensive summary."
+            ),
+            tools=[web_search, deep_research],
+            model=model,
+        )
 
 
 def build_memory_agent(model: str) -> Agent:
