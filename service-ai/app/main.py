@@ -61,6 +61,10 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
             "GEMINI_API_KEY is not configured — chat routes will fail at runtime."
         )
 
+    # ── Pre-build the agent swarm so first request has no cold-start ─────
+    from app.agents.swarm import build_swarm  # noqa: PLC0415
+    build_swarm()
+
     logger.info("service-ai startup complete.")
 
     yield  # ← application runs here
