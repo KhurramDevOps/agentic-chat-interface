@@ -3,10 +3,9 @@ app/agents/swarm.py
 ────────────────────
 Swarm orchestrator — builds the agent graph and exposes run_swarm().
 
-This module is the single public interface the API route (chat.py) calls.
-It owns:
-  - build_swarm()  : one-time construction + SDK client wiring
-  - run_swarm()    : execute a ChatRequest through the TriageAgent
+The SDK's Runner handles MCP tool calls natively when MCPServerStdio
+instances are passed to Agent(mcp_servers=...). No custom tool-call loop
+is needed here.
 
 Constitution compliance:
   - No MongoDB imports or connections.
@@ -14,8 +13,6 @@ Constitution compliance:
 """
 
 from __future__ import annotations
-
-from functools import lru_cache
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
 
@@ -27,25 +24,62 @@ from app.schemas.chat import AgentMetadata, AgentResponse, ChatRequest
 
 logger = get_logger(__name__)
 
+# Module-level reference to the built swarm — set once by initialise_swarm()
+_triage_agent: Agent | None = None
 
-@lru_cache(maxsize=1)
-def build_swarm() -> Agent:
+
+async def initialise_swarm() -> Agent:
     """
-    Build the full agent swarm and wire the SDK's default OpenAI client.
-    Cached — called once at startup, reused for every request.
+    Build the full agent swarm, wire the SDK client, and inject MCP servers.
+    Called once from the FastAPI lifespan startup handler.
+    Idempotent — returns the cached agent on subsequent calls.
     """
+    global _triage_agent
+    if _triage_agent is not None:
+        return _triage_agent
+
+    # Wire the Gemini OpenAI-compatible client
     client = get_openai_client()
     set_default_openai_client(client)
     logger.info("Swarm client wired to Gemini OpenAI-compatible endpoint.")
 
-    triage = build_triage_agent()
-    logger.info("Swarm ready — entry point: %s", triage.name)
-    return triage
+    # Fetch MCP servers for the ResearchAgent
+    from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
+    mcp_manager = get_mcp_manager()
+    research_mcp_servers = mcp_manager.servers_for_agent("ResearchAgent")
+
+    if research_mcp_servers:
+        logger.info(
+            "Injecting %d MCP server(s) into ResearchAgent: %s",
+            len(research_mcp_servers),
+            [s.name for s in research_mcp_servers],
+        )
+    else:
+        logger.info("No MCP servers configured — ResearchAgent using mock tools.")
+
+    _triage_agent = build_triage_agent(mcp_servers=research_mcp_servers or None)
+    logger.info("Swarm ready — entry point: %s", _triage_agent.name)
+    return _triage_agent
+
+
+def get_swarm() -> Agent:
+    """
+    Return the already-initialised triage agent.
+    Raises RuntimeError if called before initialise_swarm().
+    """
+    if _triage_agent is None:
+        raise RuntimeError(
+            "Swarm has not been initialised. "
+            "Ensure initialise_swarm() is awaited in the FastAPI lifespan."
+        )
+    return _triage_agent
 
 
 async def run_swarm(request: ChatRequest) -> AgentResponse:
     """
     Execute a ChatRequest through the TriageAgent swarm.
+
+    The SDK's Runner handles all tool calls (including MCP tools) internally.
 
     Args:
         request: Validated ChatRequest from the API layer.
@@ -53,9 +87,8 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     Returns:
         AgentResponse with the final output and routing metadata.
     """
-    triage = build_swarm()
+    triage = get_swarm()
 
-    # Build the input string from the last user message
     user_input = request.last_user_message
     ensure_str(user_input, "run_swarm.user_input")
 
@@ -71,12 +104,10 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         max_turns=10,
     )
 
-    # Extract final output safely
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
 
-    # Build handoff chain from the run items
     last_agent: Agent = result.last_agent
     handoff_chain = _extract_handoff_chain(result)
     handoff_occurred = len(handoff_chain) > 1
@@ -102,10 +133,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
 
 def _extract_handoff_chain(result: RunResult) -> list[str]:
-    """
-    Walk the RunResult items to reconstruct the agent handoff chain.
-    Returns a list of agent names in execution order.
-    """
+    """Walk RunResult items to reconstruct the agent handoff chain."""
     from agents import HandoffCallItem, HandoffOutputItem  # noqa: PLC0415
 
     chain: list[str] = ["TriageAgent"]

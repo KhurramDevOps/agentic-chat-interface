@@ -24,6 +24,17 @@ import pytest
 from app.schemas.chat import AgentMetadata, AgentResponse, ChatMessage, ChatRequest
 
 
+# ── Module-level fixture: seed the swarm singleton so tests don't need lifespan ──
+
+@pytest.fixture(autouse=True)
+def seed_swarm(monkeypatch):
+    """Pre-seed _triage_agent so run_swarm() doesn't raise RuntimeError."""
+    import app.agents.swarm as swarm_module
+    monkeypatch.setattr(swarm_module, "_triage_agent", MagicMock())
+    yield
+    monkeypatch.setattr(swarm_module, "_triage_agent", None)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_request(content: str, memory_context_id: str | None = None) -> ChatRequest:

@@ -61,9 +61,14 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
             "GEMINI_API_KEY is not configured — chat routes will fail at runtime."
         )
 
-    # ── Pre-build the agent swarm so first request has no cold-start ─────
-    from app.agents.swarm import build_swarm  # noqa: PLC0415
-    build_swarm()
+    # ── Start MCP server subprocesses ────────────────────────────────────
+    from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
+    mcp_manager = get_mcp_manager()
+    await mcp_manager.start()
+
+    # ── Pre-build the agent swarm (injects MCP servers) ──────────────────
+    from app.agents.swarm import initialise_swarm  # noqa: PLC0415
+    await initialise_swarm()
 
     logger.info("service-ai startup complete.")
 
@@ -71,6 +76,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("service-ai shutting down.")
+    await mcp_manager.shutdown()
 
 
 def create_app() -> FastAPI:

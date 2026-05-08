@@ -56,15 +56,19 @@ For everything else (greetings, opinions, creative writing, coding help):
 """.strip()
 
 
-def build_triage_agent() -> Agent:
+def build_triage_agent(mcp_servers: list | None = None) -> Agent:
     """
     Construct the TriageAgent with handoffs to all domain agents.
     Called once at app startup via build_swarm().
+
+    Args:
+        mcp_servers: MCP server instances from MCPManager, injected into
+                     the ResearchAgent for real web search capability.
     """
     settings = get_settings()
     model = settings.litellm_model
 
-    research_agent = build_research_agent(model)
+    research_agent = build_research_agent(model, mcp_servers=mcp_servers)
     memory_agent = build_memory_agent(model)
     media_agent = build_media_agent(model)
 
