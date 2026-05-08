@@ -19,6 +19,7 @@ Constitution compliance:
 from __future__ import annotations
 
 import asyncio
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
@@ -46,8 +47,9 @@ def dispatch_media_job(
     """
     Schedule a background media generation job and return the task_id immediately.
 
-    This function is synchronous and non-blocking — it creates an asyncio Task
-    and returns before any work is done.
+    Uses call_soon_threadsafe so this works correctly whether called from an
+    async context or from a sync function_tool running in a thread executor
+    (which is how the openai-agents SDK invokes sync tools).
 
     Args:
         client_id:     WebSocket client to push the completion event to.
@@ -65,11 +67,18 @@ def dispatch_media_job(
         input_payload=input_payload,
     )
 
-    # Schedule the async worker — fire and forget
-    asyncio.create_task(
-        _run_media_job(task),
-        name=f"media-job-{task.task_id}",
-    )
+    # call_soon_threadsafe schedules the task creation on the event loop
+    # from any thread — safe for sync tools called via thread executor.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_soon_threadsafe(
+            lambda: loop.create_task(
+                _run_media_job(task),
+                name=f"media-job-{task.task_id}",
+            )
+        )
+    except RuntimeError:
+        logger.warning("dispatch_media_job: no running event loop — job will not execute.")
 
     logger.info(
         "Media job dispatched — task_id=%s, job_type=%s, client_id=%s",
@@ -110,12 +119,14 @@ async def _run_media_job(task: BackgroundMediaTask) -> None:
         await asyncio.sleep(_MOCK_GENERATION_DELAY)
 
         # ── COMPLETED ─────────────────────────────────────────────────────
-        mock_url = (
-            f"https://cdn.example.com/generated/"
-            f"{task.job_type.value}/{task.task_id}.png"
+        prompt = task.input_payload.get("prompt", "a beautiful abstract image")
+        encoded_prompt = urllib.parse.quote(prompt)
+        real_image_url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+            f"?width=1024&height=1024&nologo=true"
         )
         result_payload = {
-            "url": mock_url,
+            "url": real_image_url,
             "job_type": task.job_type.value,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -133,7 +144,7 @@ async def _run_media_job(task: BackgroundMediaTask) -> None:
                 result=result_payload,
             ),
         )
-        logger.info("Media job completed — task_id=%s, url=%s", task.task_id, mock_url)
+        logger.info("Media job completed — task_id=%s, url=%s", task.task_id, real_image_url)
 
     except Exception as exc:
         # ── FAILED ────────────────────────────────────────────────────────

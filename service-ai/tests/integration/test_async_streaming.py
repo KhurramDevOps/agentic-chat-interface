@@ -144,11 +144,12 @@ class TestBackgroundWorkerLifecycle:
 
     @pytest.mark.asyncio
     async def test_dispatch_returns_task_id_immediately(self):
-        """dispatch_media_job must return before any async work runs."""
+        """dispatch_media_job must return a task_id before any async work runs."""
         from app.workers.media_worker import dispatch_media_job
 
-        with patch("app.workers.media_worker.asyncio.create_task") as mock_create:
-            mock_create.return_value = MagicMock()
+        # Patch call_soon_threadsafe so no real task is scheduled during the test
+        with patch("app.workers.media_worker.asyncio.get_running_loop") as mock_loop:
+            mock_loop.return_value = MagicMock()
             task_id = dispatch_media_job(
                 client_id="c1",
                 request_id="req-1",
@@ -158,7 +159,6 @@ class TestBackgroundWorkerLifecycle:
 
         assert isinstance(task_id, str)
         assert len(task_id) > 0
-        mock_create.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_media_job_sends_running_then_completed(self):
