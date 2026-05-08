@@ -1,0 +1,165 @@
+openapi: 3.1.0
+info:
+  title: Service AI API
+  version: 0.1.0
+  description: API-first contract for service-ai only.
+servers:
+  - url: http://localhost:8000
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is healthy
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat completion endpoint routed via LiteLLM
+      operationId: createChatCompletion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: Non-streaming completion payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+  /v1/chat/stream:
+    post:
+      summary: SSE stream for token-level output
+      operationId: streamChatCompletionSSE
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: text/event-stream response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /ws/chat:
+    get:
+      summary: WebSocket streaming endpoint for real-time chat events
+      operationId: chatWebsocket
+      responses:
+        "101":
+          description: WebSocket protocol switch
+  /v1/media/generate:
+    post:
+      summary: Submit asynchronous media generation task
+      operationId: enqueueMediaTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaTaskRequest"
+      responses:
+        "202":
+          description: Accepted asynchronous task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaTaskAccepted"
+  /v1/media/tasks/{task_id}:
+    get:
+      summary: Fetch current media task status
+      operationId: getMediaTaskStatus
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current task state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaTaskStatus"
+components:
+  schemas:
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          type: string
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        stream:
+          type: boolean
+          default: false
+        memory_context_id:
+          type: string
+    ChatCompletionResponse:
+      type: object
+      required: [id, model, choices]
+      properties:
+        id:
+          type: string
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: "#/components/schemas/ChatMessage"
+    MediaTaskRequest:
+      type: object
+      required: [job_type, prompt]
+      properties:
+        job_type:
+          type: string
+          enum: [image, video, audio]
+        prompt:
+          type: string
+    MediaTaskAccepted:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [queued]
+    MediaTaskStatus:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: string
