@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from agents import Agent, handoff
 
-from app.agents.domain_agents import build_memory_agent, build_research_agent
+from app.agents.domain_agents import build_media_agent, build_memory_agent, build_research_agent
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -42,10 +42,14 @@ Routing rules (use handoffs — do NOT answer these yourself):
 - Memory intent    → transfer to MemoryAgent
   Triggers: "remember", "recall", "what did I say", "save this", "forget",
             "my preferences", "last time we talked".
+- Media intent     → transfer to MediaAgent
+  Triggers: "generate an image", "create a picture", "make a video",
+            "draw", "illustrate", "render", "produce audio", "generate media",
+            any request to create visual or audio content.
 
 When handing off:
 - Pass the full user message to the specialist.
-- Do not attempt to answer research or memory questions yourself.
+- Do not attempt to answer research, memory, or media questions yourself.
 
 For everything else (greetings, opinions, creative writing, coding help):
 - Respond directly and helpfully.
@@ -62,6 +66,7 @@ def build_triage_agent() -> Agent:
 
     research_agent = build_research_agent(model)
     memory_agent = build_memory_agent(model)
+    media_agent = build_media_agent(model)
 
     triage = Agent(
         name="TriageAgent",
@@ -79,6 +84,13 @@ def build_triage_agent() -> Agent:
                 tool_description_override=(
                     "Transfer to MemoryAgent to store or retrieve user preferences "
                     "and long-term conversational context."
+                ),
+            ),
+            handoff(
+                media_agent,
+                tool_description_override=(
+                    "Transfer to MediaAgent for any image, video, or audio generation request. "
+                    "The job runs in the background — user can keep chatting."
                 ),
             ),
         ],

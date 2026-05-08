@@ -1,14 +1,16 @@
 """
-app/agents/domain_agents.py  (T022)
-─────────────────────────────────────
-ResearchAgent and MemoryAgent domain specialists.
+app/agents/domain_agents.py  (T022 / T030)
+───────────────────────────────────────────
+ResearchAgent, MemoryAgent, and MediaAgent domain specialists.
 
-ResearchAgent  — web search (mocked for this phase; real MCP tool in Phase 5+)
+ResearchAgent  — web search (mocked; real MCP tool in Phase 6+)
 MemoryAgent    — mem0 read/write for local agentic context
+MediaAgent     — dispatches non-blocking background media generation jobs
 
 Constitution compliance:
   - No MongoDB imports or connections.
   - All dict/payload access goes through type_guards before key access.
+  - MediaAgent MUST NOT block — generate_media dispatches and returns immediately.
 """
 
 from __future__ import annotations
@@ -204,5 +206,83 @@ def build_memory_agent(model: str) -> Agent:
             "Never store sensitive credentials or PII."
         ),
         tools=[add_memory, search_memory],
+        model=model,
+    )
+
+
+# ── MediaAgent tools (T030) ───────────────────────────────────────────────────
+
+@function_tool
+def generate_media(
+    client_id: str,
+    request_id: str,
+    prompt: str,
+    job_type: str = "image",
+) -> str:
+    """
+    Dispatch a non-blocking media generation job and return an acknowledgment.
+
+    CRITICAL: This tool MUST NOT await the actual generation. It dispatches
+    the job to the background worker and returns immediately so the user
+    can continue chatting while the job runs.
+
+    Args:
+        client_id:  WebSocket client_id to push the completion event to.
+        request_id: Originating chat request ID for correlation.
+        prompt:     Description of the media to generate.
+        job_type:   "image" | "video" | "audio" (default: "image")
+
+    Returns:
+        Acknowledgment string with the task_id.
+    """
+    from app.schemas.streaming import JobType  # noqa: PLC0415
+    from app.workers.media_worker import dispatch_media_job  # noqa: PLC0415
+
+    ensure_str(client_id, "generate_media.client_id")
+    ensure_str(request_id, "generate_media.request_id")
+    ensure_str(prompt, "generate_media.prompt")
+    ensure_str(job_type, "generate_media.job_type")
+
+    # Validate job_type
+    try:
+        jt = JobType(job_type.lower())
+    except ValueError:
+        jt = JobType.IMAGE
+
+    task_id = dispatch_media_job(
+        client_id=client_id,
+        request_id=request_id,
+        job_type=jt,
+        input_payload={"prompt": prompt, "job_type": jt.value},
+    )
+
+    logger.info(
+        "generate_media dispatched — task_id=%s, client_id=%s, job_type=%s",
+        task_id, client_id, jt.value,
+    )
+    return (
+        f"Media generation started! Task ID: {task_id}. "
+        f"You'll receive the {jt.value} via WebSocket when it's ready. "
+        "Feel free to keep chatting in the meantime."
+    )
+
+
+def build_media_agent(model: str) -> Agent:
+    """Construct and return the MediaAgent."""
+    return Agent(
+        name="MediaAgent",
+        handoff_description=(
+            "Specialist for generating images, videos, and audio. "
+            "Dispatches jobs asynchronously so the user can keep chatting."
+        ),
+        instructions=(
+            "You are a media generation specialist. "
+            "When the user requests an image, video, or audio, call generate_media "
+            "with the user's client_id, request_id, their prompt, and the job_type. "
+            "Always confirm the task has been dispatched and tell the user they will "
+            "receive the result via WebSocket when generation completes. "
+            "NEVER wait for the generation to finish before responding."
+        ),
+        tools=[generate_media],
         model=model,
     )
