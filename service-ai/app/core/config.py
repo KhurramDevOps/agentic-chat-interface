@@ -39,9 +39,26 @@ class Settings(BaseSettings):
 
     # ── LiteLLM / Gemini ─────────────────────────────────────────────────
     litellm_model: str = Field(
-        default="gemini/gemini-1.5-pro",
-        description="OpenAI-style model alias resolved by LiteLLM.",
+        default="gemini-2.5-flash",
+        description="Bare model name for the Gemini OpenAI-compatible endpoint (no prefix, no 'models/').",
     )
+
+    @field_validator("litellm_model", mode="after")
+    @classmethod
+    def strip_litellm_prefix(cls, v: str) -> str:
+        """
+        Normalise the model name for the Gemini OpenAI-compatible endpoint.
+
+        The SDK's MultiProvider splits on '/' and treats the left side as a
+        provider prefix — so the model name must be bare (no slashes).
+
+        Strips:
+          - LiteLLM provider prefix:  'gemini/gemini-2.5-flash' → 'gemini-2.5-flash'
+          - Google native API prefix: 'models/gemini-2.5-flash' → 'gemini-2.5-flash'
+        """
+        if "/" in v:
+            v = v.split("/", 1)[1]
+        return v
     gemini_api_key: str = Field(
         default="",
         description="Gemini provider API key.",

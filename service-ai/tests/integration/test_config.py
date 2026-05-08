@@ -35,7 +35,7 @@ class TestSettingsDefaults:
     def test_default_litellm_model_set(self):
         from app.core.config import Settings
         s = Settings()
-        assert s.litellm_model.startswith("gemini/")
+        assert s.litellm_model.startswith("gemini")
 
     def test_mem0_use_local_true_when_no_key(self):
         from app.core.config import Settings

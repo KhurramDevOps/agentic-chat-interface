@@ -20,7 +20,7 @@ from functools import lru_cache
 from agents import Agent, Runner, RunResult, set_default_openai_client
 
 from app.agents.triage_agent import build_triage_agent
-from app.core.llm_proxy import configure_litellm, get_openai_client
+from app.core.llm_proxy import get_openai_client
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_str
 from app.schemas.chat import AgentMetadata, AgentResponse, ChatRequest
@@ -34,10 +34,9 @@ def build_swarm() -> Agent:
     Build the full agent swarm and wire the SDK's default OpenAI client.
     Cached — called once at startup, reused for every request.
     """
-    configure_litellm()
     client = get_openai_client()
     set_default_openai_client(client)
-    logger.info("Swarm client wired to LiteLLM/Gemini proxy.")
+    logger.info("Swarm client wired to Gemini OpenAI-compatible endpoint.")
 
     triage = build_triage_agent()
     logger.info("Swarm ready — entry point: %s", triage.name)
