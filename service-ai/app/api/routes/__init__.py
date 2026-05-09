@@ -32,3 +32,8 @@ router.include_router(stream_router, prefix="/stream", tags=["Stream"])
 # ── Phase 5: Media (T030) ─────────────────────────────────────────────────────
 # from app.api.routes.media import router as media_router
 # router.include_router(media_router, prefix="/media", tags=["Media"])
+
+# ── Phase 6: Files / RAG (upload + document store) ───────────────────────────
+from app.api.routes.files import router as files_router
+
+router.include_router(files_router, prefix="/files", tags=["Files"])

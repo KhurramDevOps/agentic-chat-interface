@@ -73,6 +73,53 @@ def deep_research(topic: str, max_sources: int = 3) -> str:
     )
 
 
+# ── Document analysis tool (Phase 6) ─────────────────────────────────────────
+
+@function_tool
+def analyze_document(doc_id: str, query: str) -> str:
+    """
+    Retrieve an uploaded document from the in-memory store and return its
+    content as context for answering a query.
+
+    Args:
+        doc_id: UUID returned by the /files/upload endpoint.
+        query:  The user's question or analysis request about the document.
+
+    Returns:
+        Formatted string with document context and the query for the LLM to answer.
+    """
+    from app.services.file_service import get_document_store  # noqa: PLC0415
+
+    ensure_str(doc_id, "analyze_document.doc_id")
+    ensure_str(query, "analyze_document.query")
+
+    store = get_document_store()
+    text = store.get_document(doc_id)
+
+    if text is None:
+        return (
+            f"Error: No document found with doc_id='{doc_id}'. "
+            "Please upload a PDF first using the /api/v1/files/upload endpoint "
+            "and use the returned doc_id."
+        )
+
+    # Truncate to protect the LiteLLM context window
+    _MAX_CHARS = 15_000
+    truncated = text[:_MAX_CHARS]
+    was_truncated = len(text) > _MAX_CHARS
+
+    suffix = "... [truncated]" if was_truncated else ""
+    logger.info(
+        "analyze_document — doc_id=%s, chars=%d, truncated=%s",
+        doc_id, len(text), was_truncated,
+    )
+
+    return (
+        f"Document context:\n{truncated}{suffix}\n\n"
+        f"Please analyze this context to answer: {query}"
+    )
+
+
 # ── MemoryAgent tools ─────────────────────────────────────────────────────────
 
 @function_tool
@@ -188,16 +235,18 @@ def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
             name="ResearchAgent",
             handoff_description=(
                 "Specialist for web search, current events, factual lookups, "
-                "and deep research on any topic."
+                "deep research, and analyzing uploaded PDF documents."
             ),
             instructions=(
                 "You are a research specialist with access to Tavily's search and "
                 "extraction tools. Use tavily_search to find accurate, up-to-date "
                 "information and tavily_extract to pull detailed content from specific URLs. "
+                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
                 "Always cite your sources and present findings clearly. "
                 "When research is complete, provide a comprehensive summary."
             ),
             mcp_servers=mcp_servers,
+            tools=[analyze_document],
             model=model,
         )
     else:
@@ -206,15 +255,16 @@ def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
             name="ResearchAgent",
             handoff_description=(
                 "Specialist for web search, current events, factual lookups, "
-                "and deep research on any topic."
+                "deep research, and analyzing uploaded PDF documents."
             ),
             instructions=(
                 "You are a research specialist. Use your web_search and deep_research "
                 "tools to find accurate, up-to-date information. "
+                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
                 "Always cite your sources and present findings clearly. "
                 "When research is complete, provide a comprehensive summary."
             ),
-            tools=[web_search, deep_research],
+            tools=[web_search, deep_research, analyze_document],
             model=model,
         )
 

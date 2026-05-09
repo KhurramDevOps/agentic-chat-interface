@@ -8,6 +8,15 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "aiofiles"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/c3/534eac40372d8ee36ef40df62ec129bee4fdb5ad9706e58a29be53b2c970/aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2", size = 46354 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/8a/340a1555ae33d7354dbca4faa54948d76d89a27ceef032c8c3bc661d003e/aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695", size = 14668 },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1737,6 +1746,15 @@ crypto = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "6.10.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/3f/9f2167401c2e94833ca3b69535bad89e533b5de75fefe4197a2c224baec2/pypdf-6.10.2.tar.gz", hash = "sha256:7d09ce108eff6bf67465d461b6ef352dcb8d84f7a91befc02f904455c6eea11d", size = 5315679 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/d6/1d5c60cc17bbdf37c1552d9c03862fc6d32c5836732a0415b2d637edc2d0/pypdf-6.10.2-py3-none-any.whl", hash = "sha256:aa53be9826655b51c96741e5d7983ca224d898ac0a77896e64636810517624aa", size = 336308 },
+]
+
+[[package]]
 name = "pytest"
 version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2143,13 +2161,16 @@ name = "service-ai"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiofiles" },
     { name = "fastapi" },
     { name = "litellm" },
     { name = "mem0ai" },
     { name = "openai-agents" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pypdf" },
     { name = "python-dotenv" },
+    { name = "python-multipart" },
     { name = "sse-starlette" },
     { name = "uvicorn" },
 ]
@@ -2163,13 +2184,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiofiles", specifier = ">=25.1.0" },
     { name = "fastapi", specifier = ">=0.136.1" },
     { name = "litellm", specifier = ">=1.83.14" },
     { name = "mem0ai", specifier = ">=2.0.2" },
     { name = "openai-agents", specifier = ">=0.10.5" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.14.0" },
+    { name = "pypdf", specifier = ">=6.10.2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "python-multipart", specifier = ">=0.0.27" },
     { name = "sse-starlette", specifier = ">=3.4.2" },
     { name = "uvicorn", specifier = ">=0.46.0" },
 ]
