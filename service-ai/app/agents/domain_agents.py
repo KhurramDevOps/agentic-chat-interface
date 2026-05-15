@@ -248,17 +248,15 @@ def search_memory(context_id: str, query: str) -> str:
 
 # ── Agent definitions ─────────────────────────────────────────────────────────
 
-def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
+def build_research_agent(model: str, mcp_servers: list | None = None, model_settings=None) -> Agent:
     """
     Construct and return the ResearchAgent.
 
     Args:
-        model:       Model name for this agent.
-        mcp_servers: List of MCPServerStdio instances injected at runtime
-                     from MCPManager. Falls back to built-in mock tools
-                     when no MCP servers are configured.
+        model:         Model name for this agent.
+        mcp_servers:   List of MCPServerStdio instances injected at runtime.
+        model_settings: Optional ModelSettings (e.g. parallel_tool_calls=False for Groq).
     """
-    # Use MCP servers when available; fall back to mock tools for dev/test
     if mcp_servers:
         return Agent(
             name="ResearchAgent",
@@ -277,9 +275,9 @@ def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
             mcp_servers=mcp_servers,
             tools=[analyze_document],
             model=model,
+            model_settings=model_settings,
         )
     else:
-        # Fallback: built-in Python tools (no MCP configured)
         return Agent(
             name="ResearchAgent",
             handoff_description=(
@@ -295,10 +293,11 @@ def build_research_agent(model: str, mcp_servers: list | None = None) -> Agent:
             ),
             tools=[tavily_search, analyze_document],
             model=model,
+            model_settings=model_settings,
         )
 
 
-def build_memory_agent(model: str) -> Agent:
+def build_memory_agent(model: str, model_settings=None) -> Agent:
     """Construct and return the MemoryAgent."""
     return Agent(
         name="MemoryAgent",
@@ -323,6 +322,7 @@ def build_memory_agent(model: str) -> Agent:
         ),
         tools=[add_memory, search_memory],
         model=model,
+        model_settings=model_settings,
     )
 
 
@@ -395,7 +395,7 @@ def generate_media(
     )
 
 
-def build_media_agent(model: str) -> Agent:
+def build_media_agent(model: str, model_settings=None) -> Agent:
     """Construct and return the MediaAgent."""
     return Agent(
         name="MediaAgent",
@@ -412,4 +412,5 @@ def build_media_agent(model: str) -> Agent:
         ),
         tools=[generate_media],
         model=model,
+        model_settings=model_settings,
     )

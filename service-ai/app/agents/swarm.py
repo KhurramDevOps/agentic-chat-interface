@@ -79,10 +79,13 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     """
     Execute a ChatRequest through the TriageAgent swarm.
 
-    The SDK's Runner handles all tool calls (including MCP tools) internally.
+    Passes the full conversation history as a list of OpenAI-style message
+    dicts so the SDK's Runner has native multi-turn context. The session_id
+    is injected as a system message so memory tools can use it.
 
     Args:
-        request: Validated ChatRequest from the API layer.
+        request: Validated ChatRequest — messages list contains full history
+                 (loaded and merged by the chat route before calling here).
 
     Returns:
         AgentResponse with the final output and routing metadata.
@@ -92,21 +95,34 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     user_input = request.last_user_message
     ensure_str(user_input, "run_swarm.user_input")
 
-    # Inject memory_context_id into the input so agents can use it as user_id.
-    # Prepend as a system-level context line so the LLM passes it to tools.
     context_id = request.memory_context_id or request.request_id
-    augmented_input = f"[session_id: {context_id}]\n{user_input}"
+
+    # Build the input as a list of OpenAI-style message dicts.
+    # Prepend a system message with the session_id so memory tools
+    # always have access to it without polluting the user message.
+    system_msg = {
+        "role": "system",
+        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+    }
+
+    history_msgs = [
+        {"role": msg.role, "content": msg.content}
+        for msg in request.messages
+    ]
+
+    input_messages = [system_msg] + history_msgs
 
     logger.info(
-        "run_swarm — request_id=%s, input_len=%d, context_id=%s",
+        "run_swarm — request_id=%s, input_len=%d, context_id=%s, history_turns=%d",
         request.request_id,
         len(user_input),
         context_id,
+        len(request.messages),
     )
 
     result: RunResult = await Runner.run(
         starting_agent=triage,
-        input=augmented_input,
+        input=input_messages,
         max_turns=10,
     )
 

@@ -37,31 +37,33 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
+    # ── LLM Provider ─────────────────────────────────────────────────────
+    llm_provider: Literal["gemini", "groq"] = Field(
+        default="gemini",
+        description="Active LLM provider: 'gemini' or 'groq'.",
+    )
+
     # ── LiteLLM / Gemini ─────────────────────────────────────────────────
     litellm_model: str = Field(
         default="gemini-2.5-flash",
-        description="Bare model name for the Gemini OpenAI-compatible endpoint (no prefix, no 'models/').",
+        description="Model name for the active provider.",
     )
 
     @field_validator("litellm_model", mode="after")
     @classmethod
     def strip_litellm_prefix(cls, v: str) -> str:
-        """
-        Normalise the model name for the Gemini OpenAI-compatible endpoint.
-
-        The SDK's MultiProvider splits on '/' and treats the left side as a
-        provider prefix — so the model name must be bare (no slashes).
-
-        Strips:
-          - LiteLLM provider prefix:  'gemini/gemini-2.5-flash' → 'gemini-2.5-flash'
-          - Google native API prefix: 'models/gemini-2.5-flash' → 'gemini-2.5-flash'
-        """
+        """Strip provider prefixes like 'gemini/' or 'models/' from model name."""
         if "/" in v:
             v = v.split("/", 1)[1]
         return v
-    gemini_api_key: str = Field(
-        default="",
-        description="Gemini provider API key.",
+
+    gemini_api_key: str = Field(default="", description="Gemini provider API key.")
+
+    # ── Groq ──────────────────────────────────────────────────────────────
+    groq_api_key: str = Field(default="", description="Groq API key.")
+    groq_model: str = Field(
+        default="llama-3.1-8b-instant",
+        description="Groq model name.",
     )
 
     # ── mem0 ─────────────────────────────────────────────────────────────
@@ -112,8 +114,7 @@ class Settings(BaseSettings):
         if not v:
             import warnings
             warnings.warn(
-                "GEMINI_API_KEY is not set. LiteLLM routing to Gemini will fail "
-                "at request time. Set the key in your .env file.",
+                "GEMINI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq.",
                 stacklevel=2,
             )
         return v
@@ -126,6 +127,27 @@ class Settings(BaseSettings):
     def mem0_use_local(self) -> bool:
         """True when no mem0 API key is provided — falls back to local memory."""
         return not self.mem0_api_key
+
+    @property
+    def active_model(self) -> str:
+        """Return the model name for the active provider."""
+        if self.llm_provider == "groq":
+            return self.groq_model
+        return self.litellm_model
+
+    @property
+    def active_api_key(self) -> str:
+        """Return the API key for the active provider."""
+        if self.llm_provider == "groq":
+            return self.groq_api_key
+        return self.gemini_api_key
+
+    @property
+    def active_base_url(self) -> str:
+        """Return the OpenAI-compatible base URL for the active provider."""
+        if self.llm_provider == "groq":
+            return "https://api.groq.com/openai/v1"
+        return "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
 @lru_cache(maxsize=1)

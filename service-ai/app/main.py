@@ -55,7 +55,8 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("━━━ service-ai starting ━━━")
     logger.info("Environment : %s", settings.app_env)
-    logger.info("LiteLLM model: %s", settings.litellm_model)
+    logger.info("Provider    : %s", settings.llm_provider)
+    logger.info("Model       : %s", settings.active_model)
     logger.info(
         "mem0 mode   : %s",
         "local (no API key)" if settings.mem0_use_local else "cloud",

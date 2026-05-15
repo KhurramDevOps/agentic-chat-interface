@@ -37,6 +37,7 @@ from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.streaming import ChatStreamEvent
+from app.services.history_service import get_history_store
 from app.services.streaming_service import get_connection_manager
 
 logger = get_logger(__name__)
@@ -107,6 +108,22 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 )
                 continue
 
+            # ── Load and merge conversation history ───────────────────────
+            session_id = request.memory_context_id or client_id
+            history_store = get_history_store()
+            history = history_store.get(session_id)
+
+            if history:
+                stored_messages = [
+                    ChatMessage(role=m["role"], content=m["content"])
+                    for m in history
+                ]
+                incoming_contents = {m.content for m in request.messages}
+                deduped = [m for m in stored_messages if m.content not in incoming_contents]
+                request = request.model_copy(
+                    update={"messages": deduped + list(request.messages)}
+                )
+
             # ── Status: processing ────────────────────────────────────────
             seq = manager.next_sequence(client_id)
             await manager.send_event(
@@ -158,6 +175,10 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                     sequence=seq,
                 ),
             )
+
+            # ── Save turn to history ──────────────────────────────────────
+            history_store.append(session_id, "user", request.last_user_message)
+            history_store.append(session_id, "assistant", agent_response.content)
 
             logger.info(
                 "WebSocket turn complete — client_id=%s, agent=%s",

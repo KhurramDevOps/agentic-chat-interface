@@ -19,7 +19,7 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from agents import Agent, handoff
+from agents import Agent, ModelSettings, handoff
 
 from app.agents.domain_agents import build_media_agent, build_memory_agent, build_research_agent
 from app.core.config import get_settings
@@ -30,37 +30,37 @@ logger = get_logger(__name__)
 _TRIAGE_INSTRUCTIONS = """
 You are the Triage Agent — the primary entry point for all user interactions.
 
-The user's session_id is always provided at the start of their message in the
-format [session_id: <id>]. Pass this through to specialist agents unchanged.
+You have the full conversation history in your context. Use it to answer
+follow-up questions directly without routing to any specialist.
 
 Your responsibilities:
-1. Handle casual conversation, greetings, and simple questions directly.
-2. Detect user intent and route to the correct specialist agent when needed.
+1. Handle casual conversation, greetings, simple questions, and follow-up
+   questions about the current conversation DIRECTLY — do NOT hand off.
+2. Route to specialists ONLY for the specific triggers listed below.
 
-Routing rules (use handoffs — do NOT answer these yourself):
-- Research intent  → transfer to ResearchAgent
-  Triggers: questions about current events, news, facts, "search for", "look up",
-            "what is", "who is", "when did", "how does", weather, sports scores,
-            any topic requiring up-to-date information.
-- Document intent  → transfer to ResearchAgent
-  Triggers: "analyze this document", "read this PDF", "summarize this doc",
-            "what does this document say", any message containing a doc_id,
-            any request to analyze, read, or summarize a document or PDF.
-- Memory intent    → transfer to MemoryAgent
-  Triggers: "remember", "recall", "what did I say", "save this", "forget",
-            "my preferences", "last time we talked", "what do you know about me",
-            "what are my projects", any question about past context or preferences.
-- Media intent     → transfer to MediaAgent
-  Triggers: "generate an image", "create a picture", "make a video",
-            "draw", "illustrate", "render", "produce audio", "generate media",
-            any request to create visual or audio content.
+Routing rules:
+- Research intent → ResearchAgent
+  Triggers: "search for", "look up", "what is [external fact]", "latest news",
+            weather, sports scores, current events, anything needing live web data.
 
-When handing off:
-- Pass the full user message (including the [session_id: ...] prefix) to the specialist.
-- Do not attempt to answer research, document, memory, or media questions yourself.
+- Document intent → ResearchAgent
+  Triggers: "analyze this document", "read this PDF", any message with a doc_id.
 
-For everything else (greetings, opinions, creative writing, coding help):
-- Respond directly and helpfully.
+- Long-term memory (EXPLICIT save/recall only) → MemoryAgent
+  Triggers: ONLY when user says "remember this for next time", "save this permanently",
+            "recall from our last session", "what did I tell you before", "forget that".
+  DO NOT route here for: statements of fact, preferences shared in conversation,
+  or questions answerable from the current chat history.
+
+- Media intent → MediaAgent
+  Triggers: "generate an image", "create a picture", "make a video", "draw", "render".
+
+CRITICAL RULES:
+- If the user says "My favorite X is Y" → respond directly, do NOT route to MemoryAgent.
+- If the user asks "What is my favorite X?" and it was mentioned earlier in this
+  conversation → answer directly from history, do NOT route to MemoryAgent.
+- Only route to MemoryAgent when the user EXPLICITLY asks to save or retrieve
+  something from a PREVIOUS session using words like "remember", "save", "recall".
 """.strip()
 
 
@@ -74,39 +74,49 @@ def build_triage_agent(mcp_servers: list | None = None) -> Agent:
                      the ResearchAgent for real web search capability.
     """
     settings = get_settings()
-    model = settings.litellm_model
+    model = settings.active_model
 
-    research_agent = build_research_agent(model, mcp_servers=mcp_servers)
-    memory_agent = build_memory_agent(model)
-    media_agent = build_media_agent(model)
+    # Groq requires parallel_tool_calls=False — it doesn't support parallel calls
+    # and generates malformed tool call syntax when it's enabled.
+    model_settings = ModelSettings(parallel_tool_calls=False) if settings.llm_provider == "groq" else ModelSettings()
+
+    research_agent = build_research_agent(model, mcp_servers=mcp_servers, model_settings=model_settings)
+    memory_agent = build_memory_agent(model, model_settings=model_settings)
+    media_agent = build_media_agent(model, model_settings=model_settings)
+
+    h_research = handoff(
+        research_agent,
+        tool_description_override=(
+            "Transfer to ResearchAgent for web searches, current events, "
+            "factual lookups, and any question requiring up-to-date information."
+        ),
+    )
+    h_memory = handoff(
+        memory_agent,
+        tool_description_override=(
+            "Transfer to MemoryAgent to store or retrieve user preferences "
+            "and long-term conversational context."
+        ),
+    )
+    h_media = handoff(
+        media_agent,
+        tool_description_override=(
+            "Transfer to MediaAgent for any image, video, or audio generation request. "
+            "The job runs in the background — user can keep chatting."
+        ),
+    )
+
+    # Disable strict JSON schema validation — required for Groq compatibility.
+    # Groq rejects handoff tool schemas that have 'required' without 'properties'.
+    for h in (h_research, h_memory, h_media):
+        object.__setattr__(h, "strict_json_schema", False)
 
     triage = Agent(
         name="TriageAgent",
         instructions=_TRIAGE_INSTRUCTIONS,
-        handoffs=[
-            handoff(
-                research_agent,
-                tool_description_override=(
-                    "Transfer to ResearchAgent for web searches, current events, "
-                    "factual lookups, and any question requiring up-to-date information."
-                ),
-            ),
-            handoff(
-                memory_agent,
-                tool_description_override=(
-                    "Transfer to MemoryAgent to store or retrieve user preferences "
-                    "and long-term conversational context."
-                ),
-            ),
-            handoff(
-                media_agent,
-                tool_description_override=(
-                    "Transfer to MediaAgent for any image, video, or audio generation request. "
-                    "The job runs in the background — user can keep chatting."
-                ),
-            ),
-        ],
+        handoffs=[h_research, h_memory, h_media],
         model=model,
+        model_settings=model_settings,
     )
 
     logger.info(

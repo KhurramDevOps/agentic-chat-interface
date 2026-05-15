@@ -1,21 +1,14 @@
 """
-app/core/llm_proxy.py  (T021 — revised)
-─────────────────────────────────────────
-OpenAI client configured for Google's native OpenAI-compatible endpoint.
+app/core/llm_proxy.py
+──────────────────────
+Provider-aware OpenAI-compatible client factory.
 
-We bypass LiteLLM entirely and point the Agents SDK's AsyncOpenAI client
-directly at Google's Gemini REST endpoint, which speaks the OpenAI Chat
-Completions protocol natively.
+Supports:
+  - Gemini  : https://generativelanguage.googleapis.com/v1beta/openai/
+  - Groq    : https://api.groq.com/openai/v1
 
-Endpoint: https://generativelanguage.googleapis.com/v1beta/openai/
-Auth:      GEMINI_API_KEY
-
-Critical SDK configuration applied at module load:
-  - OPENAI_TELEMETRY=false  : prevents env-var-level telemetry init
-  - set_tracing_disabled()  : disables SDK-level trace POSTs to OpenAI
-  - set_default_openai_api("chat_completions") : forces the SDK to use
-    /v1/chat/completions instead of /v1/responses (which Gemini doesn't
-    support and returns 404).
+Switch providers by setting LLM_PROVIDER=gemini|groq in .env.
+The active model and API key are resolved automatically from Settings.
 
 Constitution compliance:
   - No MongoDB imports or connections.
@@ -34,39 +27,29 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 # ── SDK-level fixes applied once at import time ───────────────────────────────
-
-# Prevent telemetry env-var check from firing before the SDK is fully loaded
 os.environ["OPENAI_TELEMETRY"] = "false"
-
-# Disable the SDK's built-in tracing client (stops 401 POSTs to OpenAI)
 set_tracing_disabled(True)
-
-# Force Chat Completions transport — Gemini does NOT support /v1/responses
 set_default_openai_api("chat_completions")
 
 logger = get_logger(__name__)
-
-_GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
 @lru_cache(maxsize=1)
 def get_openai_client() -> AsyncOpenAI:
     """
-    Return a singleton AsyncOpenAI client pointed at Google's
-    OpenAI-compatible Gemini endpoint.
-
-    The Agents SDK calls set_default_openai_client() once at startup
-    (done in build_swarm()) so every Agent instance shares this client.
+    Return a singleton AsyncOpenAI client for the active LLM provider.
+    Provider is determined by LLM_PROVIDER in .env (gemini | groq).
     """
     settings = get_settings()
 
     logger.info(
-        "Configuring AsyncOpenAI client → base_url=%s, model=%s",
-        _GEMINI_OPENAI_BASE,
-        settings.litellm_model,
+        "Configuring AsyncOpenAI client → provider=%s, base_url=%s, model=%s",
+        settings.llm_provider,
+        settings.active_base_url,
+        settings.active_model,
     )
 
     return AsyncOpenAI(
-        api_key=settings.gemini_api_key,
-        base_url=_GEMINI_OPENAI_BASE,
+        api_key=settings.active_api_key,
+        base_url=settings.active_base_url,
     )

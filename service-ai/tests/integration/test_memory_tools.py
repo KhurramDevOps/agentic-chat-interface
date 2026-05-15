@@ -211,7 +211,7 @@ class TestSessionIdInjection:
 
     @pytest.mark.asyncio
     async def test_memory_context_id_injected_into_input(self):
-        """run_swarm must prepend [session_id: <id>] when memory_context_id is set."""
+        """run_swarm must inject session_id as a system message when memory_context_id is set."""
         with patch("app.agents.swarm.Runner.run", new_callable=AsyncMock) as mock_run:
             mock_run.return_value = self._make_mock_result()
             from app.agents.swarm import run_swarm
@@ -223,7 +223,11 @@ class TestSessionIdInjection:
             ))
 
         passed_input = mock_run.call_args.kwargs.get("input") or mock_run.call_args.args[1]
-        assert "[session_id: user-khurram]" in passed_input
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "user-khurram" in all_content
 
     @pytest.mark.asyncio
     async def test_request_id_used_as_fallback_session(self):
@@ -238,4 +242,8 @@ class TestSessionIdInjection:
             ))
 
         passed_input = mock_run.call_args.kwargs.get("input") or mock_run.call_args.args[1]
-        assert "[session_id: fallback-id-999]" in passed_input
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "fallback-id-999" in all_content

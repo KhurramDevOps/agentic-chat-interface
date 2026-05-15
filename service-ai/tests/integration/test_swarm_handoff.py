@@ -145,9 +145,13 @@ class TestTriageHandoffToResearch:
 
         call_kwargs = mock_run.call_args
         assert call_kwargs is not None
-        # input is the second positional arg or keyword
         passed_input = call_kwargs.kwargs.get("input") or call_kwargs.args[1]
-        assert "black holes" in passed_input
+        # input is now a list of message dicts
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "black holes" in all_content
 
 
 # ── Test 2: MemoryAgent tool safety ───────────────────────────────────────────
@@ -224,10 +228,7 @@ class TestContextPreservation:
 
     @pytest.mark.asyncio
     async def test_multi_turn_messages_passed_to_runner(self):
-        """
-        Runner.run must receive the last user message from a multi-turn
-        conversation, not just the first message.
-        """
+        """Runner.run must receive the last user message from a multi-turn conversation."""
         mock_result = _make_mock_result("Research complete.", "ResearchAgent")
         with patch("app.agents.swarm.Runner.run", new_callable=AsyncMock) as mock_run:
             mock_run.return_value = mock_result
@@ -245,8 +246,11 @@ class TestContextPreservation:
 
         call_kwargs = mock_run.call_args
         passed_input = call_kwargs.kwargs.get("input") or call_kwargs.args[1]
-        # Must use the LAST user message
-        assert "quantum computing" in passed_input
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "quantum computing" in all_content
 
     @pytest.mark.asyncio
     async def test_response_contains_model_field(self):
