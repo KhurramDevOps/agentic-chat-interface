@@ -207,14 +207,19 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         if not isinstance(event, RawResponsesStreamEvent):
             continue
 
-        # Chat Completions API: delta is in choices[0].delta.content
         data = event.data
-        if not hasattr(data, "choices"):
-            continue
-        choices = data.choices
-        if not choices:
-            continue
-        delta_content = choices[0].delta.content if choices[0].delta else None
+        delta_content: str | None = None
+
+        # Chat Completions API: choices[0].delta.content
+        if hasattr(data, "choices") and data.choices:
+            delta = data.choices[0].delta
+            if delta and delta.content:
+                delta_content = delta.content
+
+        # Responses API: ResponseTextDeltaEvent (type="response.output_text.delta")
+        elif hasattr(data, "type") and data.type == "response.output_text.delta":
+            delta_content = getattr(data, "delta", None)
+
         if delta_content:
             yield delta_content
 
