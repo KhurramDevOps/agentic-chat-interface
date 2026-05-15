@@ -28,6 +28,42 @@ logger = get_logger(__name__)
 _triage_agent: Agent | None = None
 
 
+def sanitize_history_for_groq(messages: list[dict]) -> list[dict]:
+    """
+    Strip tool-call artifacts from message history before sending to Groq.
+
+    Groq's Llama models reject messages with 'role: tool' or assistant messages
+    that contain 'tool_calls' without corresponding text content. This sanitizer
+    removes those entries so multi-turn sessions don't break.
+
+    Rules:
+      - Drop any message with role='tool'
+      - For role='assistant' with 'tool_calls':
+          - If it also has non-empty 'content' → keep but strip 'tool_calls'
+          - If content is empty/None → drop entirely
+      - Keep all 'user', 'system', and clean 'assistant' messages unchanged
+    """
+    sanitized = []
+    for msg in messages:
+        role = msg.get("role", "")
+
+        if role == "tool":
+            continue  # drop tool result messages
+
+        if role == "assistant" and "tool_calls" in msg:
+            content = msg.get("content") or ""
+            if content.strip():
+                # Keep the text but strip the tool_calls key
+                clean = {k: v for k, v in msg.items() if k != "tool_calls"}
+                sanitized.append(clean)
+            # else: pure tool-call assistant turn — drop it
+            continue
+
+        sanitized.append(msg)
+
+    return sanitized
+
+
 async def initialise_swarm() -> Agent:
     """
     Build the full agent swarm, wire the SDK client, and inject MCP servers.
@@ -112,6 +148,11 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
     input_messages = [system_msg] + history_msgs
 
+    # Sanitize tool-call artifacts for Groq compatibility
+    from app.core.config import get_settings as _cfg  # noqa: PLC0415
+    if _cfg().llm_provider == "groq":
+        input_messages = sanitize_history_for_groq(input_messages)
+
     logger.info(
         "run_swarm — request_id=%s, input_len=%d, context_id=%s, history_turns=%d",
         request.request_id,
@@ -194,6 +235,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     _settings = _get_settings()
     run_config = None
     if _settings.llm_provider == "groq":
+        input_messages = sanitize_history_for_groq(input_messages)
         run_config = RunConfig(model_settings=ModelSettings(parallel_tool_calls=False))
 
     result = Runner.run_streamed(
