@@ -160,11 +160,25 @@ def get_settings_dep() -> Settings:
 
 
 def get_request_id(request: Request) -> str:
-    """
-    Extract X-Request-ID from incoming headers, or generate a new UUID.
-    Downstream handlers can inject this to correlate logs with requests.
-    """
+    """Extract X-Request-ID from incoming headers, or generate a new UUID."""
     return _extract_request_id(request)
+
+
+async def verify_api_key(request: Request) -> None:
+    """
+    Dependency that enforces API key authentication.
+    Reads X-API-Key header and compares to settings.api_key.
+    If api_key is empty (dev mode), auth is skipped.
+    """
+    settings = get_settings()
+    if not settings.api_key:
+        return  # auth disabled in dev
+    key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+    if not key or key != settings.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": {"code": "UNAUTHORIZED", "message": "Invalid or missing API key.", "request_id": _extract_request_id(request)}},
+        )
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

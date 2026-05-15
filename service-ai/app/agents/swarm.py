@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.agents.triage_agent import build_triage_agent
 from app.core.llm_proxy import get_openai_client
@@ -23,6 +24,12 @@ from app.core.type_guards import ensure_str
 from app.schemas.chat import AgentMetadata, AgentResponse, ChatRequest
 
 logger = get_logger(__name__)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry on rate-limit (429) or server errors (500/503)."""
+    msg = str(exc).lower()
+    return any(code in msg for code in ["429", "500", "503", "rate limit", "overloaded"])
 
 # Module-level reference to the built swarm — set once by initialise_swarm()
 _triage_agent: Agent | None = None
@@ -111,6 +118,21 @@ def get_swarm() -> Agent:
     return _triage_agent
 
 
+@retry(
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    reraise=True,
+)
+async def _run_with_retry(agent: Agent, input_messages: list) -> RunResult:
+    """Execute Runner.run with exponential backoff on 429/500/503."""
+    return await Runner.run(
+        starting_agent=agent,
+        input=input_messages,
+        max_turns=10,
+    )
+
+
 async def run_swarm(request: ChatRequest) -> AgentResponse:
     """
     Execute a ChatRequest through the TriageAgent swarm.
@@ -161,11 +183,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         len(request.messages),
     )
 
-    result: RunResult = await Runner.run(
-        starting_agent=triage,
-        input=input_messages,
-        max_turns=10,
-    )
+    result: RunResult = await _run_with_retry(triage, input_messages)
 
     final_output = result.final_output
     if not isinstance(final_output, str):

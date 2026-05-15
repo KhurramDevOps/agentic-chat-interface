@@ -84,9 +84,12 @@ class Settings(BaseSettings):
     media_task_max_queue: int = Field(default=50, ge=1)
 
     # ── Tavily Search ─────────────────────────────────────────────────────
-    tavily_api_key: str = Field(
+    tavily_api_key: str = Field(default="", description="Tavily Search API key.")
+
+    # ── API Security ──────────────────────────────────────────────────────
+    api_key: str = Field(
         default="",
-        description="Tavily Search API key for the ResearchAgent web search tool.",
+        description="Master API key for securing chat endpoints. Empty = auth disabled (dev only).",
     )
 
     # ── Constitution safeguard ───────────────────────────────────────────

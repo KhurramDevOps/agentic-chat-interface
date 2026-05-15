@@ -72,14 +72,14 @@ async def get_history(session_id: str) -> list[dict]:
 
 async def append_to_history(session_id: str, role: str, content: str) -> None:
     """
-    Append a message to the session history and trim to MAX_HISTORY_MESSAGES.
-    Errors are logged but never raised — history failure must not crash the request.
+    Append a message to the session history.
+    When history exceeds MAX_HISTORY_MESSAGES, summarizes old messages
+    instead of just slicing, preserving context intelligently.
     """
     try:
         col = _get_collection()
         new_msg = {"role": role, "content": content}
 
-        # Fetch current history to check for system message preservation
         current = await get_history(session_id)
         has_system = bool(current) and current[0].get("role") == "system"
 
@@ -87,8 +87,16 @@ async def append_to_history(session_id: str, role: str, content: str) -> None:
             system_msg = current[0]
             rest = current[1:]
             rest.append(new_msg)
-            trimmed_rest = rest[-(MAX_HISTORY_MESSAGES - 1):]
-            new_messages = [system_msg] + trimmed_rest
+
+            if len(rest) > MAX_HISTORY_MESSAGES - 1:
+                # Summarize messages 0..9 of rest, keep 10+ and new message
+                to_summarize = rest[:10]
+                to_keep = rest[10:]
+                summary_text = await _summarize_messages(to_summarize)
+                summary_msg = {"role": "system", "content": f"Summary of previous conversation: {summary_text}"}
+                new_messages = [system_msg, summary_msg] + to_keep
+            else:
+                new_messages = [system_msg] + rest
 
             await col.update_one(
                 {"session_id": session_id},
@@ -96,22 +104,56 @@ async def append_to_history(session_id: str, role: str, content: str) -> None:
                 upsert=True,
             )
         else:
+            current.append(new_msg)
+            if len(current) > MAX_HISTORY_MESSAGES:
+                to_summarize = current[:10]
+                to_keep = current[10:]
+                summary_text = await _summarize_messages(to_summarize)
+                summary_msg = {"role": "system", "content": f"Summary of previous conversation: {summary_text}"}
+                current = [summary_msg] + to_keep
+
             await col.update_one(
                 {"session_id": session_id},
-                {
-                    "$push": {
-                        "messages": {
-                            "$each": [new_msg],
-                            "$slice": -MAX_HISTORY_MESSAGES,
-                        }
-                    }
-                },
+                {"$set": {"messages": current}},
                 upsert=True,
             )
 
         logger.debug("history.append — session=%s, role=%s", session_id, role)
     except Exception as exc:
         logger.warning("append_to_history failed — session=%s, error=%s", session_id, exc)
+
+
+async def _summarize_messages(messages: list[dict]) -> str:
+    """
+    Use the LLM to generate a concise summary of a list of messages.
+    Falls back to a simple concatenation if the LLM call fails.
+    """
+    try:
+        from openai import AsyncOpenAI  # noqa: PLC0415
+        from app.core.config import get_settings  # noqa: PLC0415
+        from app.core.llm_proxy import get_openai_client  # noqa: PLC0415
+
+        settings = get_settings()
+        client: AsyncOpenAI = get_openai_client()
+
+        transcript = "\n".join(
+            f"{m['role'].capitalize()}: {m['content']}" for m in messages
+        )
+        prompt = (
+            "Summarize the following conversation in 2-3 concise sentences, "
+            "capturing the key facts and context:\n\n" + transcript
+        )
+
+        response = await client.chat.completions.create(
+            model=settings.active_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        return response.choices[0].message.content or "No summary available."
+    except Exception as exc:
+        logger.warning("_summarize_messages failed — %s", exc)
+        # Fallback: simple truncated transcript
+        return " | ".join(f"{m['role']}: {m['content'][:50]}" for m in messages[:5])
 
 
 async def clear_history(session_id: str) -> None:

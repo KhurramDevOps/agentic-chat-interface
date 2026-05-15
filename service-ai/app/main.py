@@ -28,6 +28,9 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.deps import (
@@ -39,6 +42,9 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+# ── Rate limiter (slowapi, in-memory, no Redis needed) ────────────────────────
+limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 
 
 @asynccontextmanager
@@ -105,6 +111,10 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+    # Attach limiter to app state (required by slowapi)
+    app.state.limiter = limiter
 
     # ── CORS (tightened in production via env) ───────────────────────────
     app.add_middleware(

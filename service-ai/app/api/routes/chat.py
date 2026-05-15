@@ -19,16 +19,19 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.agents.swarm import run_swarm
-from app.api.deps import get_request_id, http_error
+from app.api.deps import get_request_id, http_error, verify_api_key
 from app.core.logging import get_logger
 from app.schemas.chat import AgentResponse, ChatMessage, ChatRequest
 from app.services.history_service import append_to_history, get_history
 
 logger = get_logger(__name__)
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post(
@@ -37,8 +40,11 @@ router = APIRouter()
     status_code=status.HTTP_200_OK,
     summary="Chat completion via TriageAgent swarm",
     tags=["Chat"],
+    dependencies=[Depends(verify_api_key)],
 )
+@limiter.limit("10/minute")
 async def chat_completions(
+    request: Request,
     body: ChatRequest,
     request_id: str = Depends(get_request_id),
 ) -> AgentResponse:

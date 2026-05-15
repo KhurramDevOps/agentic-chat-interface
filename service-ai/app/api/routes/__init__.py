@@ -37,3 +37,8 @@ router.include_router(stream_router, prefix="/stream", tags=["Stream"])
 from app.api.routes.files import router as files_router
 
 router.include_router(files_router, prefix="/files", tags=["Files"])
+
+# ── Phase 7: SSE streaming endpoint ──────────────────────────────────────────
+from app.api.routes.sse import router as sse_router
+
+router.include_router(sse_router, prefix="/chat", tags=["Chat"])
