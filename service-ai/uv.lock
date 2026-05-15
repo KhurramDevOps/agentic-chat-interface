@@ -2244,6 +2244,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
+    { name = "certifi" },
     { name = "fastapi" },
     { name = "litellm" },
     { name = "mem0ai" },
@@ -2270,6 +2271,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=25.1.0" },
+    { name = "certifi", specifier = ">=2026.4.22" },
     { name = "fastapi", specifier = ">=0.136.1" },
     { name = "litellm", specifier = ">=1.83.14" },
     { name = "mem0ai", specifier = ">=2.0.2" },

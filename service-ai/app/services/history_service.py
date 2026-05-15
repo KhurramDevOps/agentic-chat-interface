@@ -37,12 +37,18 @@ _COLLECTION = "conversations"
 _client: AsyncIOMotorClient | None = None
 
 
+def _reset_client() -> None:
+    """Force re-creation of the motor client (useful after config changes)."""
+    global _client
+    _client = None
+
+
 def _get_collection():
     """Return the motor collection, creating the client on first call."""
     global _client
     if _client is None:
         uri = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
-        _client = AsyncIOMotorClient(uri)
+        _client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
         logger.info("HistoryStore: motor client connected → %s", uri.split("@")[-1])
     return _client[_DB_NAME][_COLLECTION]
 
@@ -51,63 +57,61 @@ def _get_collection():
 
 async def get_history(session_id: str) -> list[dict]:
     """
-    Return the message history for a session (empty list if not found).
+    Return the message history for a session (empty list if not found or on error).
     """
-    col = _get_collection()
-    doc = await col.find_one({"session_id": session_id}, {"_id": 0, "messages": 1})
-    if doc:
-        return doc.get("messages", [])
-    return []
+    try:
+        col = _get_collection()
+        doc = await col.find_one({"session_id": session_id}, {"_id": 0, "messages": 1})
+        if doc:
+            return doc.get("messages", [])
+        return []
+    except Exception as exc:
+        logger.warning("get_history failed — session=%s, error=%s", session_id, exc)
+        return []
 
 
 async def append_to_history(session_id: str, role: str, content: str) -> None:
     """
     Append a message to the session history and trim to MAX_HISTORY_MESSAGES.
-
-    Uses $push + $slice to atomically append and cap in a single operation.
-    System messages at index 0 are preserved by the trim logic.
+    Errors are logged but never raised — history failure must not crash the request.
     """
-    col = _get_collection()
-    new_msg = {"role": role, "content": content}
+    try:
+        col = _get_collection()
+        new_msg = {"role": role, "content": content}
 
-    # Fetch current history to check for system message preservation
-    current = await get_history(session_id)
-    has_system = bool(current) and current[0].get("role") == "system"
+        # Fetch current history to check for system message preservation
+        current = await get_history(session_id)
+        has_system = bool(current) and current[0].get("role") == "system"
 
-    if has_system:
-        # Keep system message + last (MAX-2) non-system messages + new message
-        # We do this in app logic: fetch, trim, replace
-        system_msg = current[0]
-        rest = current[1:]
-        rest.append(new_msg)
-        # Keep last MAX_HISTORY_MESSAGES - 1 non-system messages
-        trimmed_rest = rest[-(MAX_HISTORY_MESSAGES - 1):]
-        new_messages = [system_msg] + trimmed_rest
+        if has_system:
+            system_msg = current[0]
+            rest = current[1:]
+            rest.append(new_msg)
+            trimmed_rest = rest[-(MAX_HISTORY_MESSAGES - 1):]
+            new_messages = [system_msg] + trimmed_rest
 
-        await col.update_one(
-            {"session_id": session_id},
-            {"$set": {"messages": new_messages}},
-            upsert=True,
-        )
-    else:
-        # No system message — use atomic $push + $slice
-        await col.update_one(
-            {"session_id": session_id},
-            {
-                "$push": {
-                    "messages": {
-                        "$each": [new_msg],
-                        "$slice": -MAX_HISTORY_MESSAGES,
+            await col.update_one(
+                {"session_id": session_id},
+                {"$set": {"messages": new_messages}},
+                upsert=True,
+            )
+        else:
+            await col.update_one(
+                {"session_id": session_id},
+                {
+                    "$push": {
+                        "messages": {
+                            "$each": [new_msg],
+                            "$slice": -MAX_HISTORY_MESSAGES,
+                        }
                     }
-                }
-            },
-            upsert=True,
-        )
+                },
+                upsert=True,
+            )
 
-    logger.debug(
-        "history.append — session=%s, role=%s",
-        session_id, role,
-    )
+        logger.debug("history.append — session=%s, role=%s", session_id, role)
+    except Exception as exc:
+        logger.warning("append_to_history failed — session=%s, error=%s", session_id, exc)
 
 
 async def clear_history(session_id: str) -> None:
