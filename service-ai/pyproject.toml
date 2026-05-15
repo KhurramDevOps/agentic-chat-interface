@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.136.1",
     "litellm>=1.83.14",
     "mem0ai>=2.0.2",
+    "motor>=3.7.1",
     "openai-agents>=0.10.5",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.14.0",

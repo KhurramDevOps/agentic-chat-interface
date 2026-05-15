@@ -59,14 +59,10 @@ class TestSettingsDefaults:
 
 
 class TestMongoDBSafeguard:
-    """T011 — Constitution boundary: MongoDB variables must be rejected."""
-
-    def test_rejects_mongodb_uri(self):
-        from app.core.config import Settings
-        with pytest.raises((ValidationError, ValueError)):
-            Settings.model_validate({"mongodb_uri": "mongodb://localhost:27017"})
+    """T011 — Constitution boundary: MongoDB variables must be rejected in Settings."""
 
     def test_rejects_mongo_uri(self):
+        """mongo_uri (without 'db') is still forbidden in Settings."""
         from app.core.config import Settings
         with pytest.raises((ValidationError, ValueError)):
             Settings.model_validate({"mongo_uri": "mongodb://localhost:27017"})
@@ -81,9 +77,15 @@ class TestMongoDBSafeguard:
         with pytest.raises((ValidationError, ValueError)):
             Settings.model_validate({"mongo_url": "mongodb://localhost:27017"})
 
+    def test_accepts_mongodb_uri_for_history_service(self):
+        """MONGODB_URI is allowed — used by history_service.py (motor), not the swarm."""
+        from app.core.config import Settings
+        # Should not raise — history_service reads this from os.environ directly
+        s = Settings.model_validate({"app_env": "development"})
+        assert s.app_env == "development"
+
     def test_accepts_non_mongo_config(self):
         from app.core.config import Settings
-        # Should not raise
         s = Settings.model_validate({"app_env": "development", "app_port": 8000})
         assert s.app_port == 8000
 

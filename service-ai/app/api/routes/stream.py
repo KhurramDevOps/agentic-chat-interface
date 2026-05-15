@@ -37,7 +37,7 @@ from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.streaming import ChatStreamEvent
-from app.services.history_service import get_history_store
+from app.services.history_service import append_to_history, get_history
 from app.services.streaming_service import get_connection_manager
 
 logger = get_logger(__name__)
@@ -110,8 +110,7 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
 
             # ── Load and merge conversation history ───────────────────────
             session_id = request.memory_context_id or client_id
-            history_store = get_history_store()
-            history = history_store.get(session_id)
+            history = await get_history(session_id)
 
             if history:
                 stored_messages = [
@@ -174,9 +173,9 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
             )
 
             # ── Save turn to history ──────────────────────────────────────
-            history_store.append(session_id, "user", request.last_user_message)
+            await append_to_history(session_id, "user", request.last_user_message)
             if full_response:
-                history_store.append(session_id, "assistant", full_response)
+                await append_to_history(session_id, "assistant", full_response)
 
             logger.info(
                 "WebSocket turn complete — client_id=%s, response_len=%d",

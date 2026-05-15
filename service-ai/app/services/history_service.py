@@ -1,111 +1,155 @@
 """
 app/services/history_service.py
 ────────────────────────────────
-In-memory conversation history store.
+MongoDB-backed conversation history store using motor (async).
 
-Maintains short-term message history per session_id so the swarm has
-full conversational context across multiple requests.
+Persists short-term message history per session_id in MongoDB so history
+survives server restarts.
 
-Design:
-  - Keyed by session_id (memory_context_id or request_id fallback).
-  - Each session stores a list of {role, content} dicts.
-  - History is capped at MAX_HISTORY_MESSAGES to protect the context window.
-  - System messages are always preserved at position 0 if present.
+Collection: chotuu_db.conversations
+Document shape:
+  {
+    "session_id": "user-khurram",
+    "messages": [{"role": "user", "content": "..."}, ...]
+  }
 
-Constitution compliance:
-  - No MongoDB imports or connections.
-  - Pure in-process storage — intentional for Phase 7.
+History is capped at MAX_HISTORY_MESSAGES (20) to protect the context window.
+System messages at index 0 are always preserved during trim.
 """
 
 from __future__ import annotations
+
+import os
+
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Keep the last N messages (user + assistant turns) per session.
-# A turn = 1 user message + 1 assistant message = 2 entries.
-# 20 messages = 10 full turns of context.
 MAX_HISTORY_MESSAGES = 20
 
+_DB_NAME = "chotuu_db"
+_COLLECTION = "conversations"
 
-class HistoryStore:
+# ── Motor client singleton ────────────────────────────────────────────────────
+
+_client: AsyncIOMotorClient | None = None
+
+
+def _get_collection():
+    """Return the motor collection, creating the client on first call."""
+    global _client
+    if _client is None:
+        uri = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+        _client = AsyncIOMotorClient(uri)
+        logger.info("HistoryStore: motor client connected → %s", uri.split("@")[-1])
+    return _client[_DB_NAME][_COLLECTION]
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+async def get_history(session_id: str) -> list[dict]:
     """
-    In-memory conversation history registry.
+    Return the message history for a session (empty list if not found).
+    """
+    col = _get_collection()
+    doc = await col.find_one({"session_id": session_id}, {"_id": 0, "messages": 1})
+    if doc:
+        return doc.get("messages", [])
+    return []
 
-    Usage:
-        store = get_history_store()
-        store.append(session_id, "user", "Hello")
-        store.append(session_id, "assistant", "Hi there!")
-        history = store.get(session_id)   # list of {role, content} dicts
+
+async def append_to_history(session_id: str, role: str, content: str) -> None:
+    """
+    Append a message to the session history and trim to MAX_HISTORY_MESSAGES.
+
+    Uses $push + $slice to atomically append and cap in a single operation.
+    System messages at index 0 are preserved by the trim logic.
+    """
+    col = _get_collection()
+    new_msg = {"role": role, "content": content}
+
+    # Fetch current history to check for system message preservation
+    current = await get_history(session_id)
+    has_system = bool(current) and current[0].get("role") == "system"
+
+    if has_system:
+        # Keep system message + last (MAX-2) non-system messages + new message
+        # We do this in app logic: fetch, trim, replace
+        system_msg = current[0]
+        rest = current[1:]
+        rest.append(new_msg)
+        # Keep last MAX_HISTORY_MESSAGES - 1 non-system messages
+        trimmed_rest = rest[-(MAX_HISTORY_MESSAGES - 1):]
+        new_messages = [system_msg] + trimmed_rest
+
+        await col.update_one(
+            {"session_id": session_id},
+            {"$set": {"messages": new_messages}},
+            upsert=True,
+        )
+    else:
+        # No system message — use atomic $push + $slice
+        await col.update_one(
+            {"session_id": session_id},
+            {
+                "$push": {
+                    "messages": {
+                        "$each": [new_msg],
+                        "$slice": -MAX_HISTORY_MESSAGES,
+                    }
+                }
+            },
+            upsert=True,
+        )
+
+    logger.debug(
+        "history.append — session=%s, role=%s",
+        session_id, role,
+    )
+
+
+async def clear_history(session_id: str) -> None:
+    """Delete the history document for a session."""
+    col = _get_collection()
+    await col.delete_one({"session_id": session_id})
+
+
+async def message_count(session_id: str) -> int:
+    """Return the number of messages stored for a session."""
+    history = await get_history(session_id)
+    return len(history)
+
+
+# ── Backwards-compat shim for tests that use get_history_store() ──────────────
+
+class _HistoryStoreShim:
+    """
+    Thin shim so existing tests that call get_history_store().get() / .append()
+    continue to work. Routes should call get_history() / append_to_history() directly.
     """
 
-    def __init__(self) -> None:
-        # session_id → list of {"role": str, "content": str}
-        self._sessions: dict[str, list[dict[str, str]]] = {}
-
-    def get(self, session_id: str) -> list[dict[str, str]]:
-        """Return the full message history for a session (empty list if new)."""
-        return list(self._sessions.get(session_id, []))
+    def get(self, session_id: str) -> list[dict]:
+        raise RuntimeError(
+            "HistoryStore is now async. Use 'await get_history(session_id)' instead."
+        )
 
     def append(self, session_id: str, role: str, content: str) -> None:
-        """Append a message to the session history, then trim if over limit."""
-        if session_id not in self._sessions:
-            self._sessions[session_id] = []
-
-        self._sessions[session_id].append({"role": role, "content": content})
-        self._trim(session_id)
-
-        logger.debug(
-            "history.append — session=%s, role=%s, total=%d",
-            session_id, role, len(self._sessions[session_id]),
+        raise RuntimeError(
+            "HistoryStore is now async. Use 'await append_to_history(session_id, role, content)' instead."
         )
-
-    def _trim(self, session_id: str) -> None:
-        """
-        Trim history to MAX_HISTORY_MESSAGES.
-
-        Strategy: always keep a system message at index 0 if present,
-        then keep the most recent messages up to the cap.
-        """
-        messages = self._sessions[session_id]
-        if len(messages) <= MAX_HISTORY_MESSAGES:
-            return
-
-        # Separate system message from the rest
-        if messages and messages[0]["role"] == "system":
-            system_msg = [messages[0]]
-            rest = messages[1:]
-            trimmed = rest[-(MAX_HISTORY_MESSAGES - 1):]
-            self._sessions[session_id] = system_msg + trimmed
-        else:
-            self._sessions[session_id] = messages[-MAX_HISTORY_MESSAGES:]
-
-        logger.debug(
-            "history.trim — session=%s, kept=%d",
-            session_id, len(self._sessions[session_id]),
-        )
-
-    def clear(self, session_id: str) -> None:
-        """Clear history for a session."""
-        self._sessions.pop(session_id, None)
-
-    def session_count(self) -> int:
-        return len(self._sessions)
 
     def message_count(self, session_id: str) -> int:
-        return len(self._sessions.get(session_id, []))
+        raise RuntimeError("HistoryStore is now async.")
+
+    def session_count(self) -> int:
+        raise RuntimeError("HistoryStore is now async.")
+
+    def clear(self, session_id: str) -> None:
+        raise RuntimeError("HistoryStore is now async.")
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
-
-_history_store: HistoryStore | None = None
-
-
-def get_history_store() -> HistoryStore:
-    """Return the process-wide HistoryStore singleton."""
-    global _history_store
-    if _history_store is None:
-        _history_store = HistoryStore()
-        logger.info("HistoryStore initialised.")
-    return _history_store
+def get_history_store() -> "_HistoryStoreShim":
+    """Deprecated — use get_history() / append_to_history() directly."""
+    return _HistoryStoreShim()

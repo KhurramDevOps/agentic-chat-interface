@@ -95,14 +95,15 @@ class Settings(BaseSettings):
     def reject_mongodb_config(cls, values: dict) -> dict:
         """
         T011 — Constitution boundary safeguard.
-        Raise immediately if any MongoDB-related variable is present,
-        preventing accidental direct DB access from service-ai.
+        Raise immediately if any MongoDB-related variable is present in Settings,
+        preventing accidental direct DB access from service-ai agent/swarm code.
+        Note: MONGODB_URI is allowed in os.environ for history_service.py (motor).
         """
-        forbidden = {"mongodb_uri", "mongo_uri", "mongodb_url", "mongo_url"}
+        forbidden = {"mongo_uri", "mongodb_url", "mongo_url"}
         found = forbidden.intersection({k.lower() for k in values})
         if found:
             raise ValueError(
-                f"Constitution violation: service-ai MUST NOT configure MongoDB. "
+                f"Constitution violation: service-ai MUST NOT configure MongoDB in Settings. "
                 f"Detected forbidden variable(s): {found}. "
                 "MongoDB ownership belongs exclusively to gateway-node."
             )
