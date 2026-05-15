@@ -92,15 +92,21 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     user_input = request.last_user_message
     ensure_str(user_input, "run_swarm.user_input")
 
+    # Inject memory_context_id into the input so agents can use it as user_id.
+    # Prepend as a system-level context line so the LLM passes it to tools.
+    context_id = request.memory_context_id or request.request_id
+    augmented_input = f"[session_id: {context_id}]\n{user_input}"
+
     logger.info(
-        "run_swarm — request_id=%s, input_len=%d",
+        "run_swarm — request_id=%s, input_len=%d, context_id=%s",
         request.request_id,
         len(user_input),
+        context_id,
     )
 
     result: RunResult = await Runner.run(
         starting_agent=triage,
-        input=user_input,
+        input=augmented_input,
         max_turns=10,
     )
 

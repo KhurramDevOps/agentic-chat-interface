@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     media_task_timeout_seconds: int = Field(default=300, ge=1)
     media_task_max_queue: int = Field(default=50, ge=1)
 
+    # ── Tavily Search ─────────────────────────────────────────────────────
+    tavily_api_key: str = Field(
+        default="",
+        description="Tavily Search API key for the ResearchAgent web search tool.",
+    )
+
     # ── Constitution safeguard ───────────────────────────────────────────
     @model_validator(mode="before")
     @classmethod

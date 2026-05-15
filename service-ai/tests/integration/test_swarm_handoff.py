@@ -182,13 +182,13 @@ class TestMemoryAgentTools:
         assert "empty" in result.lower() or "error" in result.lower()
 
     def test_web_search_returns_string(self):
-        from app.agents.domain_agents import web_search
+        from app.agents.domain_agents import tavily_search
         import asyncio
         result = asyncio.get_event_loop().run_until_complete(
-            web_search.on_invoke_tool(None, '{"query": "latest AI news"}')  # type: ignore[attr-defined]
+            tavily_search.on_invoke_tool(None, '{"query": "latest AI news"}')  # type: ignore[attr-defined]
         )
         assert isinstance(result, str)
-        assert "Mock" in result or len(result) > 0
+        assert len(result) > 0
 
     @pytest.mark.asyncio
     async def test_memory_agent_swarm_call_does_not_crash(self):

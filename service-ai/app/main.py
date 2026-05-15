@@ -20,6 +20,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# Load .env before any app module imports so all env vars are available
+# at module-load time (critical for MCPManager, Settings, etc.)
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
