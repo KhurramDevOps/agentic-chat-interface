@@ -18,6 +18,7 @@ dependencies = [
     "sse-starlette>=3.4.2",
     "tavily-python>=0.7.24",
     "uvicorn>=0.46.0",
+    "websockets>=16.0",
 ]
 
 [dependency-groups]

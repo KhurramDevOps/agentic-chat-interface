@@ -172,7 +172,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Yields:
         str — incremental text chunks from the LLM.
     """
-    from agents import RawResponsesStreamEvent  # noqa: PLC0415
+    from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
 
     triage = get_swarm()
     context_id = request.memory_context_id or request.request_id
@@ -189,10 +189,18 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         request.request_id, context_id, len(request.messages),
     )
 
+    # Apply Groq-compatible model settings via run_config
+    from app.core.config import get_settings as _get_settings  # noqa: PLC0415
+    _settings = _get_settings()
+    run_config = None
+    if _settings.llm_provider == "groq":
+        run_config = RunConfig(model_settings=ModelSettings(parallel_tool_calls=False))
+
     result = Runner.run_streamed(
         starting_agent=triage,
         input=input_messages,
         max_turns=10,
+        run_config=run_config,
     )
 
     async for event in result.stream_events():
