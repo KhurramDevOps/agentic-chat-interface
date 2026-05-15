@@ -1,11 +1,8 @@
 """
 app/agents/swarm.py
 ────────────────────
-Swarm orchestrator — builds the agent graph and exposes run_swarm().
-
-The SDK's Runner handles MCP tool calls natively when MCPServerStdio
-instances are passed to Agent(mcp_servers=...). No custom tool-call loop
-is needed here.
+Swarm orchestrator — builds the agent graph and exposes run_swarm()
+and stream_swarm() for non-streaming and streaming execution.
 
 Constitution compliance:
   - No MongoDB imports or connections.
@@ -13,6 +10,9 @@ Constitution compliance:
 """
 
 from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
 
@@ -151,6 +151,70 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
             turns_used=result._current_turn,
         ),
         model=request.model,
+    )
+
+
+async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
+    """
+    Execute a ChatRequest through the TriageAgent swarm in streaming mode.
+
+    Yields text delta strings as they arrive from the LLM.
+    Tool calls and handoffs are handled internally — only final text
+    tokens are yielded to the caller.
+
+    Usage:
+        async for delta in stream_swarm(request):
+            await websocket.send_text(delta)
+
+    Args:
+        request: Validated ChatRequest with full history merged in.
+
+    Yields:
+        str — incremental text chunks from the LLM.
+    """
+    from agents import RawResponsesStreamEvent  # noqa: PLC0415
+
+    triage = get_swarm()
+    context_id = request.memory_context_id or request.request_id
+
+    system_msg = {
+        "role": "system",
+        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+    }
+    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    input_messages = [system_msg] + history_msgs
+
+    logger.info(
+        "stream_swarm — request_id=%s, context_id=%s, history_turns=%d",
+        request.request_id, context_id, len(request.messages),
+    )
+
+    result = Runner.run_streamed(
+        starting_agent=triage,
+        input=input_messages,
+        max_turns=10,
+    )
+
+    async for event in result.stream_events():
+        if not isinstance(event, RawResponsesStreamEvent):
+            continue
+
+        # Chat Completions API: delta is in choices[0].delta.content
+        data = event.data
+        if not hasattr(data, "choices"):
+            continue
+        choices = data.choices
+        if not choices:
+            continue
+        delta_content = choices[0].delta.content if choices[0].delta else None
+        if delta_content:
+            yield delta_content
+
+    # stream_events() exhausts when is_complete — no extra call needed
+    logger.info(
+        "stream_swarm complete — request_id=%s, last_agent=%s",
+        request.request_id,
+        result.last_agent.name if result.last_agent else "unknown",
     )
 
 

@@ -254,18 +254,11 @@ class TestWebSocketEndpoint:
         Uses FastAPI TestClient WebSocket support.
         """
         from app.main import app
-        from app.schemas.chat import AgentMetadata, AgentResponse
 
-        mock_response = AgentResponse(
-            request_id="ws-req-1",
-            content="Hello from the swarm!",
-            agent=AgentMetadata(agent_name="TriageAgent"),
-            model="gemini/gemini-1.5-pro",
-        )
+        async def mock_stream(*args, **kwargs):
+            yield "Hello from the swarm!"
 
-        with patch("app.api.routes.stream.run_swarm", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = mock_response
-
+        with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
                 with client.websocket_connect("/api/v1/stream/ws/test-ws-client") as ws:
                     ws.send_text(json.dumps({
@@ -286,18 +279,11 @@ class TestWebSocketEndpoint:
     def test_websocket_token_event_contains_agent_content(self):
         """Token event delta must contain the agent's response content."""
         from app.main import app
-        from app.schemas.chat import AgentMetadata, AgentResponse
 
-        mock_response = AgentResponse(
-            request_id="ws-req-2",
-            content="The answer is 42.",
-            agent=AgentMetadata(agent_name="TriageAgent"),
-            model="gemini/gemini-1.5-pro",
-        )
+        async def mock_stream(*args, **kwargs):
+            yield "The answer is 42."
 
-        with patch("app.api.routes.stream.run_swarm", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = mock_response
-
+        with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
                 with client.websocket_connect("/api/v1/stream/ws/client-42") as ws:
                     ws.send_text(json.dumps({
@@ -327,18 +313,11 @@ class TestWebSocketEndpoint:
     def test_websocket_sequence_numbers_are_monotonic(self):
         """All events in a single turn must have strictly increasing sequence numbers."""
         from app.main import app
-        from app.schemas.chat import AgentMetadata, AgentResponse
 
-        mock_response = AgentResponse(
-            request_id="seq-test",
-            content="Sequence check.",
-            agent=AgentMetadata(agent_name="TriageAgent"),
-            model="gemini/gemini-1.5-pro",
-        )
+        async def mock_stream(*args, **kwargs):
+            yield "Sequence check."
 
-        with patch("app.api.routes.stream.run_swarm", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = mock_response
-
+        with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
                 with client.websocket_connect("/api/v1/stream/ws/seq-client") as ws:
                     ws.send_text(json.dumps({

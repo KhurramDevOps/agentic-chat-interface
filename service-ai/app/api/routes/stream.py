@@ -32,7 +32,7 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from app.agents.swarm import run_swarm
+from app.agents.swarm import run_swarm, stream_swarm
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
@@ -135,13 +135,23 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 ),
             )
 
-            # ── Run swarm ─────────────────────────────────────────────────
+            # ── Stream tokens token-by-token ──────────────────────────────
+            full_response = ""
             try:
-                agent_response = await run_swarm(request)
+                async for delta in stream_swarm(request):
+                    if delta:
+                        full_response += delta
+                        seq = manager.next_sequence(client_id)
+                        await manager.send_event(
+                            client_id,
+                            ChatStreamEvent.token(
+                                request_id=request_id,
+                                sequence=seq,
+                                delta=delta,
+                            ),
+                        )
             except Exception as exc:
-                logger.exception(
-                    "Swarm error on WebSocket — client_id=%s", client_id
-                )
+                logger.exception("Swarm streaming error — client_id=%s", client_id)
                 seq = manager.next_sequence(client_id)
                 await manager.send_event(
                     client_id,
@@ -152,19 +162,6 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                     ),
                 )
                 continue
-
-            # ── Stream response as token event ────────────────────────────
-            # Phase 5: single token event with full content.
-            # Phase 6+: replace with true token-by-token streaming.
-            seq = manager.next_sequence(client_id)
-            await manager.send_event(
-                client_id,
-                ChatStreamEvent.token(
-                    request_id=request_id,
-                    sequence=seq,
-                    delta=agent_response.content,
-                ),
-            )
 
             # ── Complete ──────────────────────────────────────────────────
             seq = manager.next_sequence(client_id)
@@ -178,11 +175,12 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
 
             # ── Save turn to history ──────────────────────────────────────
             history_store.append(session_id, "user", request.last_user_message)
-            history_store.append(session_id, "assistant", agent_response.content)
+            if full_response:
+                history_store.append(session_id, "assistant", full_response)
 
             logger.info(
-                "WebSocket turn complete — client_id=%s, agent=%s",
-                client_id, agent_response.agent.agent_name,
+                "WebSocket turn complete — client_id=%s, response_len=%d",
+                client_id, len(full_response),
             )
 
     except WebSocketDisconnect:
