@@ -11,11 +11,14 @@ Event sequence per turn:
   complete     terminal marker
   title_update (first turn only) — 3-4 word session title for the sidebar
 
-Fixes applied:
-  - Short-term memory: full MongoDB history merged before every swarm call.
-  - Long-term memory: Mem0 queried with correct v2 filters syntax before swarm.
-  - Title generation: lightweight LLM call on first turn, streamed as title_update.
-  - Tool crash guard: Mem0 failures are caught and never crash the stream.
+Issue 2 fix: full history is loaded from MongoDB and merged before every
+             swarm call — the AI always has full context.
+
+Issue 3 fix: Mem0 is queried for long-term user facts before the swarm call.
+             Facts are injected as a system message so the AI knows the user.
+
+Issue 4 fix: on the first turn of a session, a lightweight LLM call generates
+             a 3-4 word title which is streamed back as a title_update event.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.agents.swarm import stream_swarm, get_last_stream_usage
+from app.agents.swarm import stream_swarm
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
@@ -37,15 +40,13 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-# ── Mem0 helpers ──────────────────────────────────────────────────────────────
+# ── Mem0 helper ───────────────────────────────────────────────────────────────
 
 async def _get_mem0_context(user_id: str, query: str) -> str:
     """
     Query Mem0 for facts relevant to this user and query.
-    Injects results as a system message before the swarm call.
-
-    FIX: mem0 v2 AsyncMemoryClient.search() does NOT accept user_id as a
-    top-level parameter — it must go inside filters={"user_id": ...}.
+    Returns a formatted string to inject into the system prompt.
+    Returns empty string if Mem0 is unavailable or no facts found.
     """
     try:
         from mem0 import AsyncMemoryClient  # noqa: PLC0415
@@ -56,35 +57,18 @@ async def _get_mem0_context(user_id: str, query: str) -> str:
             return ""
 
         client = AsyncMemoryClient(api_key=settings.mem0_api_key)
+        results = await client.search(query=query, user_id=user_id, limit=5)
 
-        # ✅ Correct mem0 v2 syntax
-        raw = await client.search(
-            query=query,
-            filters={"user_id": user_id},
-            limit=5,
-        )
+        if not results:
+            return ""
 
-        # v2 returns {"results": [...]}; older versions return a plain list
-        if isinstance(raw, dict):
-            results = raw.get("results", [])
-        elif isinstance(raw, list):
-            results = raw
-        else:
-            results = []
-
-        facts = []
-        for r in results:
-            text = (r.get("memory") or r.get("text") or "") if isinstance(r, dict) else str(r)
-            if text:
-                facts.append(text)
-
+        facts = [r.get("memory", "") for r in results if r.get("memory")]
         if not facts:
             return ""
 
         return "Relevant facts about this user:\n" + "\n".join(f"- {f}" for f in facts)
 
     except Exception as exc:
-        # Never crash the stream over a Mem0 failure
         logger.warning("Mem0 query failed — user_id=%s, error=%s", user_id, exc)
         return ""
 
@@ -104,13 +88,12 @@ async def _save_to_mem0(user_id: str, messages: list[dict]) -> None:
 
         client = AsyncMemoryClient(api_key=settings.mem0_api_key)
         await client.add(messages=messages, user_id=user_id)
-        logger.debug("Mem0 save OK — user_id=%s, turns=%d", user_id, len(messages))
 
     except Exception as exc:
         logger.warning("Mem0 save failed — user_id=%s, error=%s", user_id, exc)
 
 
-# ── Title generation ──────────────────────────────────────────────────────────
+# ── Title generation helper ───────────────────────────────────────────────────
 
 async def _generate_title(user_message: str) -> str:
     """
@@ -118,19 +101,20 @@ async def _generate_title(user_message: str) -> str:
     Falls back to a truncated version of the message on failure.
     """
     try:
+        from openai import AsyncOpenAI  # noqa: PLC0415
         from app.core.llm_proxy import get_openai_client  # noqa: PLC0415
         from app.core.config import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        client = get_openai_client()
+        client: AsyncOpenAI = get_openai_client()
 
         response = await client.chat.completions.create(
             model=settings.active_model,
             messages=[{
                 "role": "user",
                 "content": (
-                    "Generate a concise 3-4 word title for a chat session that starts with "
-                    "this message. Return ONLY the title, no punctuation, no quotes.\n\n"
+                    "Generate a concise 3-4 word title for a chat session that starts with this message. "
+                    "Return ONLY the title, no punctuation, no quotes.\n\n"
                     "Message: " + user_message[:200]
                 ),
             }],
@@ -141,6 +125,7 @@ async def _generate_title(user_message: str) -> str:
 
     except Exception as exc:
         logger.warning("Title generation failed — %s", exc)
+        # Fallback: first 30 chars of the message
         return user_message[:30] + ("…" if len(user_message) > 30 else "")
 
 
@@ -151,13 +136,13 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
     """
     Persistent WebSocket endpoint for a single chat client.
 
-    Expected payload from frontend:
+    The payload sent by the frontend must include:
       {
-        "request_id":        "uuid",
-        "messages":          [{"role": "user", "content": "..."}],
-        "model":             "gemini/gemini-1.5-pro",
+        "request_id":       "uuid",
+        "messages":         [{"role": "user", "content": "..."}],
+        "model":            "gemini/gemini-1.5-pro",
         "memory_context_id": "session-uuid",
-        "user_id":           "mongodb-user-id"
+        "user_id":          "mongodb-user-id"   ← injected by frontend from JWT
       }
     """
     manager = get_connection_manager()
@@ -166,7 +151,6 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
 
     try:
         while True:
-            # ── Receive ───────────────────────────────────────────────────
             raw = await websocket.receive_text()
 
             try:
@@ -176,15 +160,13 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 seq = manager.next_sequence(client_id)
                 await manager.send_event(
                     client_id,
-                    ChatStreamEvent.error(
-                        request_id="unknown", sequence=seq,
-                        message=f"Invalid JSON payload: {exc}",
-                    ),
+                    ChatStreamEvent.error(request_id="unknown", sequence=seq,
+                                         message=f"Invalid JSON: {exc}"),
                 )
                 continue
 
-            request_id   = payload.get("request_id") or client_id
-            user_id      = payload.get("user_id") or client_id
+            request_id = payload.get("request_id") or client_id
+            user_id    = payload.get("user_id") or client_id  # Issue 3: Mem0 user key
             messages_raw = payload.get("messages", [])
 
             if not messages_raw:
@@ -203,45 +185,41 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 seq = manager.next_sequence(client_id)
                 await manager.send_event(
                     client_id,
-                    ChatStreamEvent.error(
-                        request_id=request_id, sequence=seq,
-                        message=f"Request validation error: {exc}",
-                    ),
+                    ChatStreamEvent.error(request_id=request_id, sequence=seq,
+                                         message=f"Request validation error: {exc}"),
                 )
                 continue
 
-            session_id    = request.memory_context_id or client_id
-            user_message  = request.last_user_message
-            is_first_turn = (await message_count(session_id)) == 0
+            session_id      = request.memory_context_id or client_id
+            user_message    = request.last_user_message
+            is_first_turn   = (await message_count(session_id)) == 0
 
-            # ── Short-term memory: load full history and merge ────────────
+            # ── Issue 2: Load full history and merge ──────────────────────
             history = await get_history(session_id)
             if history:
-                stored   = [ChatMessage(role=m["role"], content=m["content"]) for m in history]
+                stored = [ChatMessage(role=m["role"], content=m["content"]) for m in history]
                 incoming = {m.content for m in request.messages}
                 deduped  = [m for m in stored if m.content not in incoming]
                 request  = request.model_copy(
                     update={"messages": deduped + list(request.messages)}
                 )
 
-            # ── Long-term memory: inject Mem0 facts as system message ─────
+            # ── Issue 3: Inject Mem0 long-term memory as system message ───
             mem0_context = await _get_mem0_context(user_id, user_message)
             if mem0_context:
                 mem0_msg = ChatMessage(role="system", content=mem0_context)
                 request  = request.model_copy(
                     update={"messages": [mem0_msg] + list(request.messages)}
                 )
-                logger.info("Mem0 context injected — user_id=%s, chars=%d",
+                logger.info("Mem0 context injected — user_id=%s, facts=%d chars",
                             user_id, len(mem0_context))
 
             # ── Status ────────────────────────────────────────────────────
             seq = manager.next_sequence(client_id)
             await manager.send_event(
                 client_id,
-                ChatStreamEvent.status(
-                    request_id=request_id, sequence=seq,
-                    message="Processing your message...",
-                ),
+                ChatStreamEvent.status(request_id=request_id, sequence=seq,
+                                       message="Processing your message..."),
             )
 
             # ── Stream tokens ─────────────────────────────────────────────
@@ -253,19 +231,16 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                         seq = manager.next_sequence(client_id)
                         await manager.send_event(
                             client_id,
-                            ChatStreamEvent.token(
-                                request_id=request_id, sequence=seq, delta=delta,
-                            ),
+                            ChatStreamEvent.token(request_id=request_id,
+                                                  sequence=seq, delta=delta),
                         )
             except Exception as exc:
                 logger.exception("Swarm streaming error — client_id=%s", client_id)
                 seq = manager.next_sequence(client_id)
                 await manager.send_event(
                     client_id,
-                    ChatStreamEvent.error(
-                        request_id=request_id, sequence=seq,
-                        message=f"Agent error: {exc}",
-                    ),
+                    ChatStreamEvent.error(request_id=request_id, sequence=seq,
+                                         message=f"Agent error: {exc}"),
                 )
                 continue
 
@@ -276,33 +251,24 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 ChatStreamEvent.complete(request_id=request_id, sequence=seq),
             )
 
-            # ── Title update on first turn ────────────────────────────────
+            # ── Issue 4: Generate and stream title on first turn ──────────
             if is_first_turn:
                 title = await _generate_title(user_message)
                 if title:
-                    await websocket.send_text(json.dumps({
+                    title_event = {
                         "event_type": "title_update",
                         "request_id": request_id,
                         "title": title,
-                    }))
-                    logger.info("Title sent — session=%s, title=%s", session_id, title)
+                    }
+                    await websocket.send_text(json.dumps(title_event))
+                    logger.info("Title generated — session=%s, title=%s", session_id, title)
 
-            # ── Persist to short-term history ─────────────────────────────
+            # ── Persist turn to short-term history ────────────────────────
             await append_to_history(session_id, "user", user_message)
             if full_response:
                 await append_to_history(session_id, "assistant", full_response)
 
-            # ── Record token usage ────────────────────────────────────────
-            usage = get_last_stream_usage()
-            if usage.get("total_tokens"):
-                await record_token_usage(
-                    user_id=user_id,
-                    session_id=session_id,
-                    prompt_tokens=usage["prompt_tokens"],
-                    completion_tokens=usage["completion_tokens"],
-                )
-
-            # ── Save to Mem0 for long-term memory ─────────────────────────
+            # ── Issue 3: Save turn to Mem0 for long-term memory ───────────
             await _save_to_mem0(user_id, [
                 {"role": "user",      "content": user_message},
                 {"role": "assistant", "content": full_response},
