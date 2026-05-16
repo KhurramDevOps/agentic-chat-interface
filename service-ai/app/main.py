@@ -20,9 +20,17 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# Load .env before any app module imports so all env vars are available
+# at module-load time (critical for MCPManager, Settings, etc.)
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.deps import (
@@ -34,6 +42,9 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+# ── Rate limiter (slowapi, in-memory, no Redis needed) ────────────────────────
+limiter = Limiter(key_func=get_remote_address, default_limits=["10/minute"])
 
 
 @asynccontextmanager
@@ -50,7 +61,8 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("━━━ service-ai starting ━━━")
     logger.info("Environment : %s", settings.app_env)
-    logger.info("LiteLLM model: %s", settings.litellm_model)
+    logger.info("Provider    : %s", settings.llm_provider)
+    logger.info("Model       : %s", settings.active_model)
     logger.info(
         "mem0 mode   : %s",
         "local (no API key)" if settings.mem0_use_local else "cloud",
@@ -61,9 +73,14 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
             "GEMINI_API_KEY is not configured — chat routes will fail at runtime."
         )
 
-    # ── Pre-build the agent swarm so first request has no cold-start ─────
-    from app.agents.swarm import build_swarm  # noqa: PLC0415
-    build_swarm()
+    # ── Start MCP server subprocesses ────────────────────────────────────
+    from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
+    mcp_manager = get_mcp_manager()
+    await mcp_manager.start()
+
+    # ── Pre-build the agent swarm (injects MCP servers) ──────────────────
+    from app.agents.swarm import initialise_swarm  # noqa: PLC0415
+    await initialise_swarm()
 
     logger.info("service-ai startup complete.")
 
@@ -71,6 +88,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("service-ai shutting down.")
+    await mcp_manager.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -93,6 +111,10 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
+    # Attach limiter to app state (required by slowapi)
+    app.state.limiter = limiter
 
     # ── CORS (tightened in production via env) ───────────────────────────
     app.add_middleware(

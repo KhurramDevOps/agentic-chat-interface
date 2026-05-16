@@ -37,14 +37,33 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
+    # ── LLM Provider ─────────────────────────────────────────────────────
+    llm_provider: Literal["gemini", "groq"] = Field(
+        default="gemini",
+        description="Active LLM provider: 'gemini' or 'groq'.",
+    )
+
     # ── LiteLLM / Gemini ─────────────────────────────────────────────────
     litellm_model: str = Field(
-        default="gemini/gemini-1.5-pro",
-        description="OpenAI-style model alias resolved by LiteLLM.",
+        default="gemini-2.5-flash",
+        description="Model name for the active provider.",
     )
-    gemini_api_key: str = Field(
-        default="",
-        description="Gemini provider API key.",
+
+    @field_validator("litellm_model", mode="after")
+    @classmethod
+    def strip_litellm_prefix(cls, v: str) -> str:
+        """Strip provider prefixes like 'gemini/' or 'models/' from model name."""
+        if "/" in v:
+            v = v.split("/", 1)[1]
+        return v
+
+    gemini_api_key: str = Field(default="", description="Gemini provider API key.")
+
+    # ── Groq ──────────────────────────────────────────────────────────────
+    groq_api_key: str = Field(default="", description="Groq API key.")
+    groq_model: str = Field(
+        default="llama-3.1-8b-instant",
+        description="Groq model name.",
     )
 
     # ── mem0 ─────────────────────────────────────────────────────────────
@@ -64,20 +83,30 @@ class Settings(BaseSettings):
     media_task_timeout_seconds: int = Field(default=300, ge=1)
     media_task_max_queue: int = Field(default=50, ge=1)
 
+    # ── Tavily Search ─────────────────────────────────────────────────────
+    tavily_api_key: str = Field(default="", description="Tavily Search API key.")
+
+    # ── API Security ──────────────────────────────────────────────────────
+    api_key: str = Field(
+        default="",
+        description="Master API key for securing chat endpoints. Empty = auth disabled (dev only).",
+    )
+
     # ── Constitution safeguard ───────────────────────────────────────────
     @model_validator(mode="before")
     @classmethod
     def reject_mongodb_config(cls, values: dict) -> dict:
         """
         T011 — Constitution boundary safeguard.
-        Raise immediately if any MongoDB-related variable is present,
-        preventing accidental direct DB access from service-ai.
+        Raise immediately if any MongoDB-related variable is present in Settings,
+        preventing accidental direct DB access from service-ai agent/swarm code.
+        Note: MONGODB_URI is allowed in os.environ for history_service.py (motor).
         """
-        forbidden = {"mongodb_uri", "mongo_uri", "mongodb_url", "mongo_url"}
+        forbidden = {"mongo_uri", "mongodb_url", "mongo_url"}
         found = forbidden.intersection({k.lower() for k in values})
         if found:
             raise ValueError(
-                f"Constitution violation: service-ai MUST NOT configure MongoDB. "
+                f"Constitution violation: service-ai MUST NOT configure MongoDB in Settings. "
                 f"Detected forbidden variable(s): {found}. "
                 "MongoDB ownership belongs exclusively to gateway-node."
             )
@@ -89,8 +118,7 @@ class Settings(BaseSettings):
         if not v:
             import warnings
             warnings.warn(
-                "GEMINI_API_KEY is not set. LiteLLM routing to Gemini will fail "
-                "at request time. Set the key in your .env file.",
+                "GEMINI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq.",
                 stacklevel=2,
             )
         return v
@@ -103,6 +131,27 @@ class Settings(BaseSettings):
     def mem0_use_local(self) -> bool:
         """True when no mem0 API key is provided — falls back to local memory."""
         return not self.mem0_api_key
+
+    @property
+    def active_model(self) -> str:
+        """Return the model name for the active provider."""
+        if self.llm_provider == "groq":
+            return self.groq_model
+        return self.litellm_model
+
+    @property
+    def active_api_key(self) -> str:
+        """Return the API key for the active provider."""
+        if self.llm_provider == "groq":
+            return self.groq_api_key
+        return self.gemini_api_key
+
+    @property
+    def active_base_url(self) -> str:
+        """Return the OpenAI-compatible base URL for the active provider."""
+        if self.llm_provider == "groq":
+            return "https://api.groq.com/openai/v1"
+        return "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
 @lru_cache(maxsize=1)

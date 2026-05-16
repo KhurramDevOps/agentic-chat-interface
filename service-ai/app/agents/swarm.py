@@ -1,12 +1,8 @@
 """
 app/agents/swarm.py
 ────────────────────
-Swarm orchestrator — builds the agent graph and exposes run_swarm().
-
-This module is the single public interface the API route (chat.py) calls.
-It owns:
-  - build_swarm()  : one-time construction + SDK client wiring
-  - run_swarm()    : execute a ChatRequest through the TriageAgent
+Swarm orchestrator — builds the agent graph and exposes run_swarm()
+and stream_swarm() for non-streaming and streaming execution.
 
 Constitution compliance:
   - No MongoDB imports or connections.
@@ -15,12 +11,14 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from functools import lru_cache
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.agents.triage_agent import build_triage_agent
-from app.core.llm_proxy import configure_litellm, get_openai_client
+from app.core.llm_proxy import get_openai_client
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_str
 from app.schemas.chat import AgentMetadata, AgentResponse, ChatRequest
@@ -28,56 +26,169 @@ from app.schemas.chat import AgentMetadata, AgentResponse, ChatRequest
 logger = get_logger(__name__)
 
 
-@lru_cache(maxsize=1)
-def build_swarm() -> Agent:
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry on rate-limit (429) or server errors (500/503)."""
+    msg = str(exc).lower()
+    return any(code in msg for code in ["429", "500", "503", "rate limit", "overloaded"])
+
+# Module-level reference to the built swarm — set once by initialise_swarm()
+_triage_agent: Agent | None = None
+
+
+def sanitize_history_for_groq(messages: list[dict]) -> list[dict]:
     """
-    Build the full agent swarm and wire the SDK's default OpenAI client.
-    Cached — called once at startup, reused for every request.
+    Strip tool-call artifacts from message history before sending to Groq.
+
+    Groq's Llama models reject messages with 'role: tool' or assistant messages
+    that contain 'tool_calls' without corresponding text content. This sanitizer
+    removes those entries so multi-turn sessions don't break.
+
+    Rules:
+      - Drop any message with role='tool'
+      - For role='assistant' with 'tool_calls':
+          - If it also has non-empty 'content' → keep but strip 'tool_calls'
+          - If content is empty/None → drop entirely
+      - Keep all 'user', 'system', and clean 'assistant' messages unchanged
     """
-    configure_litellm()
+    sanitized = []
+    for msg in messages:
+        role = msg.get("role", "")
+
+        if role == "tool":
+            continue  # drop tool result messages
+
+        if role == "assistant" and "tool_calls" in msg:
+            content = msg.get("content") or ""
+            if content.strip():
+                # Keep the text but strip the tool_calls key
+                clean = {k: v for k, v in msg.items() if k != "tool_calls"}
+                sanitized.append(clean)
+            # else: pure tool-call assistant turn — drop it
+            continue
+
+        sanitized.append(msg)
+
+    return sanitized
+
+
+async def initialise_swarm() -> Agent:
+    """
+    Build the full agent swarm, wire the SDK client, and inject MCP servers.
+    Called once from the FastAPI lifespan startup handler.
+    Idempotent — returns the cached agent on subsequent calls.
+    """
+    global _triage_agent
+    if _triage_agent is not None:
+        return _triage_agent
+
+    # Wire the Gemini OpenAI-compatible client
     client = get_openai_client()
     set_default_openai_client(client)
-    logger.info("Swarm client wired to LiteLLM/Gemini proxy.")
+    logger.info("Swarm client wired to Gemini OpenAI-compatible endpoint.")
 
-    triage = build_triage_agent()
-    logger.info("Swarm ready — entry point: %s", triage.name)
-    return triage
+    # Fetch MCP servers for the ResearchAgent
+    from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
+    mcp_manager = get_mcp_manager()
+    research_mcp_servers = mcp_manager.servers_for_agent("ResearchAgent")
+
+    if research_mcp_servers:
+        logger.info(
+            "Injecting %d MCP server(s) into ResearchAgent: %s",
+            len(research_mcp_servers),
+            [s.name for s in research_mcp_servers],
+        )
+    else:
+        logger.info("No MCP servers configured — ResearchAgent using mock tools.")
+
+    _triage_agent = build_triage_agent(mcp_servers=research_mcp_servers or None)
+    logger.info("Swarm ready — entry point: %s", _triage_agent.name)
+    return _triage_agent
+
+
+def get_swarm() -> Agent:
+    """
+    Return the already-initialised triage agent.
+    Raises RuntimeError if called before initialise_swarm().
+    """
+    if _triage_agent is None:
+        raise RuntimeError(
+            "Swarm has not been initialised. "
+            "Ensure initialise_swarm() is awaited in the FastAPI lifespan."
+        )
+    return _triage_agent
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    reraise=True,
+)
+async def _run_with_retry(agent: Agent, input_messages: list) -> RunResult:
+    """Execute Runner.run with exponential backoff on 429/500/503."""
+    return await Runner.run(
+        starting_agent=agent,
+        input=input_messages,
+        max_turns=10,
+    )
 
 
 async def run_swarm(request: ChatRequest) -> AgentResponse:
     """
     Execute a ChatRequest through the TriageAgent swarm.
 
+    Passes the full conversation history as a list of OpenAI-style message
+    dicts so the SDK's Runner has native multi-turn context. The session_id
+    is injected as a system message so memory tools can use it.
+
     Args:
-        request: Validated ChatRequest from the API layer.
+        request: Validated ChatRequest — messages list contains full history
+                 (loaded and merged by the chat route before calling here).
 
     Returns:
         AgentResponse with the final output and routing metadata.
     """
-    triage = build_swarm()
+    triage = get_swarm()
 
-    # Build the input string from the last user message
     user_input = request.last_user_message
     ensure_str(user_input, "run_swarm.user_input")
 
+    context_id = request.memory_context_id or request.request_id
+
+    # Build the input as a list of OpenAI-style message dicts.
+    # Prepend a system message with the session_id so memory tools
+    # always have access to it without polluting the user message.
+    system_msg = {
+        "role": "system",
+        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+    }
+
+    history_msgs = [
+        {"role": msg.role, "content": msg.content}
+        for msg in request.messages
+    ]
+
+    input_messages = [system_msg] + history_msgs
+
+    # Sanitize tool-call artifacts for Groq compatibility
+    from app.core.config import get_settings as _cfg  # noqa: PLC0415
+    if _cfg().llm_provider == "groq":
+        input_messages = sanitize_history_for_groq(input_messages)
+
     logger.info(
-        "run_swarm — request_id=%s, input_len=%d",
+        "run_swarm — request_id=%s, input_len=%d, context_id=%s, history_turns=%d",
         request.request_id,
         len(user_input),
+        context_id,
+        len(request.messages),
     )
 
-    result: RunResult = await Runner.run(
-        starting_agent=triage,
-        input=user_input,
-        max_turns=10,
-    )
+    result: RunResult = await _run_with_retry(triage, input_messages)
 
-    # Extract final output safely
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
 
-    # Build handoff chain from the run items
     last_agent: Agent = result.last_agent
     handoff_chain = _extract_handoff_chain(result)
     handoff_occurred = len(handoff_chain) > 1
@@ -102,11 +213,86 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     )
 
 
+async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
+    """
+    Execute a ChatRequest through the TriageAgent swarm in streaming mode.
+
+    Yields text delta strings as they arrive from the LLM.
+    Tool calls and handoffs are handled internally — only final text
+    tokens are yielded to the caller.
+
+    Usage:
+        async for delta in stream_swarm(request):
+            await websocket.send_text(delta)
+
+    Args:
+        request: Validated ChatRequest with full history merged in.
+
+    Yields:
+        str — incremental text chunks from the LLM.
+    """
+    from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
+
+    triage = get_swarm()
+    context_id = request.memory_context_id or request.request_id
+
+    system_msg = {
+        "role": "system",
+        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+    }
+    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    input_messages = [system_msg] + history_msgs
+
+    logger.info(
+        "stream_swarm — request_id=%s, context_id=%s, history_turns=%d",
+        request.request_id, context_id, len(request.messages),
+    )
+
+    # Apply Groq-compatible model settings via run_config
+    from app.core.config import get_settings as _get_settings  # noqa: PLC0415
+    _settings = _get_settings()
+    run_config = None
+    if _settings.llm_provider == "groq":
+        input_messages = sanitize_history_for_groq(input_messages)
+        run_config = RunConfig(model_settings=ModelSettings(parallel_tool_calls=False))
+
+    result = Runner.run_streamed(
+        starting_agent=triage,
+        input=input_messages,
+        max_turns=10,
+        run_config=run_config,
+    )
+
+    async for event in result.stream_events():
+        if not isinstance(event, RawResponsesStreamEvent):
+            continue
+
+        data = event.data
+        delta_content: str | None = None
+
+        # Chat Completions API: choices[0].delta.content
+        if hasattr(data, "choices") and data.choices:
+            delta = data.choices[0].delta
+            if delta and delta.content:
+                delta_content = delta.content
+
+        # Responses API: ResponseTextDeltaEvent (type="response.output_text.delta")
+        elif hasattr(data, "type") and data.type == "response.output_text.delta":
+            delta_content = getattr(data, "delta", None)
+
+        if delta_content:
+            yield delta_content
+
+    # stream_events() exhausts when is_complete — no extra call needed
+    logger.info(
+        "stream_swarm complete — request_id=%s, last_agent=%s",
+        request.request_id,
+        result.last_agent.name if result.last_agent else "unknown",
+    )
+
+
 def _extract_handoff_chain(result: RunResult) -> list[str]:
-    """
-    Walk the RunResult items to reconstruct the agent handoff chain.
-    Returns a list of agent names in execution order.
-    """
+    """Walk RunResult items to reconstruct the agent handoff chain."""
     from agents import HandoffCallItem, HandoffOutputItem  # noqa: PLC0415
 
     chain: list[str] = ["TriageAgent"]

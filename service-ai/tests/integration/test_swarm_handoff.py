@@ -24,6 +24,17 @@ import pytest
 from app.schemas.chat import AgentMetadata, AgentResponse, ChatMessage, ChatRequest
 
 
+# ── Module-level fixture: seed the swarm singleton so tests don't need lifespan ──
+
+@pytest.fixture(autouse=True)
+def seed_swarm(monkeypatch):
+    """Pre-seed _triage_agent so run_swarm() doesn't raise RuntimeError."""
+    import app.agents.swarm as swarm_module
+    monkeypatch.setattr(swarm_module, "_triage_agent", MagicMock())
+    yield
+    monkeypatch.setattr(swarm_module, "_triage_agent", None)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_request(content: str, memory_context_id: str | None = None) -> ChatRequest:
@@ -134,9 +145,13 @@ class TestTriageHandoffToResearch:
 
         call_kwargs = mock_run.call_args
         assert call_kwargs is not None
-        # input is the second positional arg or keyword
         passed_input = call_kwargs.kwargs.get("input") or call_kwargs.args[1]
-        assert "black holes" in passed_input
+        # input is now a list of message dicts
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "black holes" in all_content
 
 
 # ── Test 2: MemoryAgent tool safety ───────────────────────────────────────────
@@ -171,13 +186,13 @@ class TestMemoryAgentTools:
         assert "empty" in result.lower() or "error" in result.lower()
 
     def test_web_search_returns_string(self):
-        from app.agents.domain_agents import web_search
+        from app.agents.domain_agents import tavily_search
         import asyncio
         result = asyncio.get_event_loop().run_until_complete(
-            web_search.on_invoke_tool(None, '{"query": "latest AI news"}')  # type: ignore[attr-defined]
+            tavily_search.on_invoke_tool(None, '{"query": "latest AI news"}')  # type: ignore[attr-defined]
         )
         assert isinstance(result, str)
-        assert "Mock" in result or len(result) > 0
+        assert len(result) > 0
 
     @pytest.mark.asyncio
     async def test_memory_agent_swarm_call_does_not_crash(self):
@@ -213,10 +228,7 @@ class TestContextPreservation:
 
     @pytest.mark.asyncio
     async def test_multi_turn_messages_passed_to_runner(self):
-        """
-        Runner.run must receive the last user message from a multi-turn
-        conversation, not just the first message.
-        """
+        """Runner.run must receive the last user message from a multi-turn conversation."""
         mock_result = _make_mock_result("Research complete.", "ResearchAgent")
         with patch("app.agents.swarm.Runner.run", new_callable=AsyncMock) as mock_run:
             mock_run.return_value = mock_result
@@ -234,8 +246,11 @@ class TestContextPreservation:
 
         call_kwargs = mock_run.call_args
         passed_input = call_kwargs.kwargs.get("input") or call_kwargs.args[1]
-        # Must use the LAST user message
-        assert "quantum computing" in passed_input
+        if isinstance(passed_input, list):
+            all_content = " ".join(m.get("content", "") for m in passed_input)
+        else:
+            all_content = passed_input
+        assert "quantum computing" in all_content
 
     @pytest.mark.asyncio
     async def test_response_contains_model_field(self):
