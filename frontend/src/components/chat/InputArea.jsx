@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import useChatStore from '../../store/chatStore';
+import useAuthStore from '../../store/authStore';
 import '../../styles/Chat.css';
 
 /**
@@ -19,6 +20,7 @@ function InputArea({ sendMessage, sessionId }) {
 
   const addMessage = useChatStore((s) => s.addMessage);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const user = useAuthStore((s) => s.user);
 
   const handleSend = () => {
     const content = text.trim();
@@ -33,6 +35,7 @@ function InputArea({ sendMessage, sessionId }) {
       messages: [{ role: 'user', content }],
       model: 'gemini/gemini-1.5-pro',
       memory_context_id: sessionId,
+      user_id: user?._id || user?.id || sessionId, // Issue 3: Mem0 user key
     };
     sendMessage(payload);
 

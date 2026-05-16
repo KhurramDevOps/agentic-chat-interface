@@ -1,12 +1,13 @@
 import { create } from 'zustand';
+import { getHistory } from '../api/historyApi';
 
 /**
  * chatStore.js
  * ─────────────
  * Zustand store for all chat state.
  *
- * State shape:
- *   sessions        — list of { id, title, createdAt }
+ * State:
+ *   sessions        — [{ id, title, createdAt }]
  *   activeSessionId — currently open session UUID
  *   messages        — committed messages [{ id, role, content, timestamp }]
  *   isStreaming     — true while WebSocket is receiving token events
@@ -35,17 +36,26 @@ const useChatStore = create((set, get) => ({
   },
 
   addSession: (session) => {
+    // Prevent duplicates
+    const exists = get().sessions.some((s) => s.id === session.id);
+    if (exists) return;
+    set((state) => ({ sessions: [session, ...state.sessions] }));
+  },
+
+  /**
+   * Update a session's title in the sidebar.
+   * Called when a 'title_update' WebSocket event arrives (Issue 4).
+   */
+  updateSessionTitle: (sessionId, title) => {
     set((state) => ({
-      sessions: [session, ...state.sessions],
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, title } : s
+      ),
     }));
   },
 
   // ── Message management ──────────────────────────────────────────────────
 
-  /**
-   * Commit a message to the permanent message list.
-   * role: 'user' | 'assistant'
-   */
   addMessage: (role, content) => {
     const message = {
       id: crypto.randomUUID(),
@@ -53,14 +63,11 @@ const useChatStore = create((set, get) => ({
       content,
       timestamp: new Date().toISOString(),
     };
-    set((state) => ({
-      messages: [...state.messages, message],
-    }));
+    set((state) => ({ messages: [...state.messages, message] }));
   },
 
   /**
-   * Load history from the API response into the message list.
-   * Replaces current messages for the active session.
+   * Load raw message array directly into state (used by ChatPage on session switch).
    */
   loadMessages: (rawMessages) => {
     const messages = rawMessages.map((m) => ({
@@ -72,12 +79,45 @@ const useChatStore = create((set, get) => ({
     set({ messages });
   },
 
+  /**
+   * Fetch history from the API for a sessionId and populate messages.
+   * Called by ChatPage whenever the URL sessionId changes.
+   */
+  loadHistory: async (sessionId) => {
+    set({ messages: [], isStreaming: false, streamingContent: '', error: null });
+    try {
+      const { data } = await getHistory(sessionId);
+      const msgs = data?.messages || [];
+      if (msgs.length > 0) {
+        const messages = msgs.map((m) => ({
+          id: crypto.randomUUID(),
+          role: m.role,
+          content: m.content,
+          timestamp: m.timestamp || new Date().toISOString(),
+        }));
+        set({ messages });
+
+        // If the session title is still a placeholder, update it from history
+        const firstUser = msgs.find((m) => m.role === 'user');
+        if (firstUser) {
+          const sessions = get().sessions;
+          const session = sessions.find((s) => s.id === sessionId);
+          if (session && session.title === 'Loading...') {
+            const preview = firstUser.content.slice(0, 30);
+            get().updateSessionTitle(sessionId, preview + (firstUser.content.length > 30 ? '…' : ''));
+          }
+        }
+      }
+    } catch (err) {
+      // 404 = new session, not an error
+      if (err?.response?.status !== 404) {
+        console.warn('[chatStore] loadHistory failed:', err.message);
+      }
+    }
+  },
+
   // ── Streaming ───────────────────────────────────────────────────────────
 
-  /**
-   * Called on every 'token' WebSocket event.
-   * Accumulates delta text into streamingContent.
-   */
   appendStreamingToken: (delta) => {
     set((state) => ({
       isStreaming: true,
@@ -85,10 +125,6 @@ const useChatStore = create((set, get) => ({
     }));
   },
 
-  /**
-   * Called on 'complete' WebSocket event.
-   * Moves accumulated streamingContent into the committed messages list.
-   */
   finalizeStream: () => {
     const { streamingContent } = get();
     if (streamingContent.trim()) {
@@ -111,16 +147,10 @@ const useChatStore = create((set, get) => ({
   // ── Error & cleanup ─────────────────────────────────────────────────────
 
   setError: (error) => set({ error, isStreaming: false, streamingContent: '' }),
-
   clearError: () => set({ error: null }),
 
   clearSession: () => {
-    set({
-      messages: [],
-      streamingContent: '',
-      isStreaming: false,
-      error: null,
-    });
+    set({ messages: [], streamingContent: '', isStreaming: false, error: null });
   },
 }));
 

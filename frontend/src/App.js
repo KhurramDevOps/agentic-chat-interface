@@ -11,9 +11,10 @@ function App() {
         {/* Public */}
         <Route path="/login" element={<AuthPortal />} />
 
-        {/* Protected */}
+        {/* Protected — both /chat and /chat/:sessionId render ChatPage */}
         <Route element={<ProtectedRoute />}>
           <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
         </Route>
 
         {/* Default redirect */}
