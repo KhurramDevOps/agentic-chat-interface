@@ -42,3 +42,8 @@ router.include_router(files_router, prefix="/files", tags=["Files"])
 from app.api.routes.sse import router as sse_router
 
 router.include_router(sse_router, prefix="/chat", tags=["Chat"])
+
+# ── Phase 8: Audio transcription (Groq Whisper) ───────────────────────────────
+from app.api.routes.audio import router as audio_router
+
+router.include_router(audio_router, prefix="/audio", tags=["Audio"])

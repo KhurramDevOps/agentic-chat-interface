@@ -198,11 +198,21 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     handoff_chain = _extract_handoff_chain(result)
     handoff_occurred = len(handoff_chain) > 1
 
+    # Extract token usage from all model responses in this run
+    prompt_tokens = 0
+    completion_tokens = 0
+    for model_response in result.raw_responses:
+        usage = getattr(model_response, "usage", None)
+        if usage:
+            prompt_tokens += getattr(usage, "input_tokens", 0)
+            completion_tokens += getattr(usage, "output_tokens", 0)
+
     logger.info(
-        "run_swarm complete — last_agent=%s, handoff=%s, turns=%d",
+        "run_swarm complete — last_agent=%s, handoff=%s, turns=%d, tokens=%d",
         last_agent.name,
         handoff_occurred,
         result._current_turn,
+        prompt_tokens + completion_tokens,
     )
 
     return AgentResponse(
@@ -215,6 +225,11 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
             turns_used=result._current_turn,
         ),
         model=request.model,
+        usage={
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
     )
 
 

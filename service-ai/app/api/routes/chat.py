@@ -8,10 +8,12 @@ Routes:
 
 History flow:
   1. Derive session_id from memory_context_id (or request_id fallback).
-  2. Load existing history from MongoDB via get_history().
-  3. Merge history + new user message into request.messages.
-  4. Run swarm with full context.
-  5. Append user message + assistant response via append_to_history().
+  2. Resolve / create user identity via user_service.
+  3. Load existing history from MongoDB via get_history().
+  4. Merge history + new user message into request.messages.
+  5. Run swarm with full context.
+  6. Append user message + assistant response via append_to_history().
+  7. Record token usage against the user profile.
 
 Constitution compliance:
   - Delegates all LLM work to the swarm; route is thin orchestration only.
@@ -21,17 +23,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, status
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from app.agents.swarm import run_swarm
-from app.api.deps import get_request_id, http_error, verify_api_key
+from app.api.deps import get_request_id, http_error, verify_api_key, get_user_key
 from app.core.logging import get_logger
 from app.schemas.chat import AgentResponse, ChatMessage, ChatRequest
 from app.services.history_service import append_to_history, get_history
+from app.services.user_service import get_or_create_user, record_token_usage
 
 logger = get_logger(__name__)
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_user_key)
 
 
 @router.post(
@@ -42,7 +44,7 @@ limiter = Limiter(key_func=get_remote_address)
     tags=["Chat"],
     dependencies=[Depends(verify_api_key)],
 )
-@limiter.limit("10/minute")
+@limiter.limit("20/minute")
 async def chat_completions(
     request: Request,
     body: ChatRequest,
@@ -52,11 +54,16 @@ async def chat_completions(
         body = body.model_copy(update={"request_id": request_id})
 
     session_id = body.memory_context_id or body.request_id
+    # X-User-ID header allows the gateway to pass a real authenticated user_id
+    user_id = request.headers.get("x-user-id") or None
 
     logger.info(
         "POST /chat/completions — request_id=%s, session_id=%s, model=%s",
         body.request_id, session_id, body.model,
     )
+
+    # ── Resolve user identity ─────────────────────────────────────────────
+    await get_or_create_user(session_id=session_id, user_id=user_id)
 
     # ── Load history and merge ────────────────────────────────────────────
     history = await get_history(session_id)
@@ -87,6 +94,15 @@ async def chat_completions(
     # ── Persist to MongoDB ────────────────────────────────────────────────
     await append_to_history(session_id, "user", body.last_user_message)
     await append_to_history(session_id, "assistant", response.content)
+
+    # ── Record token usage ────────────────────────────────────────────────
+    if response.usage:
+        await record_token_usage(
+            session_id=session_id,
+            prompt_tokens=response.usage.get("prompt_tokens", 0),
+            completion_tokens=response.usage.get("completion_tokens", 0),
+            user_id=user_id,
+        )
 
     logger.info("history saved — session=%s", session_id)
 

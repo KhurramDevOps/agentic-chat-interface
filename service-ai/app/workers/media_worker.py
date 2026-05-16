@@ -6,13 +6,12 @@ Background worker for long-running media generation jobs.
 Flow:
   1. MediaAgent calls dispatch_media_job() — returns immediately with task_id.
   2. dispatch_media_job() schedules _run_media_job() as an asyncio Task.
-  3. _run_media_job() simulates work (asyncio.sleep), then pushes a
-     ChatStreamEvent(event_type=background_update) to the client via
-     the ConnectionManager singleton.
+  3. _run_media_job() polls the Pollinations URL until it returns HTTP 200
+     with an image content-type, then pushes a background_update event.
 
 Constitution compliance:
   - No MongoDB imports or connections.
-  - No blocking I/O — asyncio.sleep mocks the long-running work.
+  - All I/O is async (httpx.AsyncClient).
   - ConnectionManager send errors are isolated; worker never crashes.
 """
 
@@ -20,8 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import urllib.parse
-import uuid
 from datetime import datetime, timezone
+
+import httpx
 
 from app.core.logging import get_logger
 from app.schemas.streaming import (
@@ -34,8 +34,10 @@ from app.services.streaming_service import get_connection_manager
 
 logger = get_logger(__name__)
 
-# Simulated generation time (seconds) — replace with real API call in production
-_MOCK_GENERATION_DELAY = 3
+# Polling config
+_POLL_INTERVAL_SECONDS = 2
+_POLL_MAX_ATTEMPTS = 30          # 30 × 2s = 60s max wait
+_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 # Reference to the main FastAPI event loop — set once at app startup via
 # set_main_event_loop(). Allows sync function_tools running in thread
@@ -116,9 +118,11 @@ async def _run_media_job(task: BackgroundMediaTask) -> None:
 
     Steps:
       1. Transition to RUNNING, push status update.
-      2. Simulate work with asyncio.sleep.
-      3. Transition to COMPLETED, push background_update with result.
-      4. On any error, transition to FAILED and push error event.
+      2. Build the Pollinations URL from the prompt.
+      3. Poll the URL every _POLL_INTERVAL_SECONDS until it returns HTTP 200
+         with an image content-type (max _POLL_MAX_ATTEMPTS attempts).
+      4. Transition to COMPLETED and push background_update with the URL.
+      5. On timeout or any error, transition to FAILED and push error event.
     """
     manager = get_connection_manager()
 
@@ -135,21 +139,51 @@ async def _run_media_job(task: BackgroundMediaTask) -> None:
     )
 
     try:
-        logger.info(
-            "Media job running — task_id=%s, delay=%ds",
-            task.task_id, _MOCK_GENERATION_DELAY,
-        )
-        await asyncio.sleep(_MOCK_GENERATION_DELAY)
-
-        # ── COMPLETED ─────────────────────────────────────────────────────
         prompt = task.input_payload.get("prompt", "a beautiful abstract image")
         encoded_prompt = urllib.parse.quote(prompt)
-        real_image_url = (
+        image_url = (
             f"https://image.pollinations.ai/prompt/{encoded_prompt}"
             f"?width=1024&height=1024&nologo=true"
         )
+
+        logger.info(
+            "Media job polling — task_id=%s, url=%s",
+            task.task_id, image_url,
+        )
+
+        # ── Poll until image is ready ─────────────────────────────────────
+        verified = False
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            for attempt in range(1, _POLL_MAX_ATTEMPTS + 1):
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+                try:
+                    resp = await client.get(image_url)
+                    content_type = resp.headers.get("content-type", "")
+                    ct_base = content_type.split(";")[0].strip().lower()
+
+                    logger.debug(
+                        "Poll attempt %d/%d — status=%d, content-type=%s",
+                        attempt, _POLL_MAX_ATTEMPTS, resp.status_code, ct_base,
+                    )
+
+                    if resp.status_code == 200 and ct_base in _IMAGE_CONTENT_TYPES:
+                        verified = True
+                        break
+                except httpx.RequestError as exc:
+                    logger.warning(
+                        "Poll attempt %d failed — task_id=%s, error=%s",
+                        attempt, task.task_id, exc,
+                    )
+
+        if not verified:
+            raise TimeoutError(
+                f"Image not ready after {_POLL_MAX_ATTEMPTS * _POLL_INTERVAL_SECONDS}s — "
+                f"url={image_url}"
+            )
+
+        # ── COMPLETED ─────────────────────────────────────────────────────
         result_payload = {
-            "url": real_image_url,
+            "url": image_url,
             "job_type": task.job_type.value,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -167,7 +201,7 @@ async def _run_media_job(task: BackgroundMediaTask) -> None:
                 result=result_payload,
             ),
         )
-        logger.info("Media job completed — task_id=%s, url=%s", task.task_id, real_image_url)
+        logger.info("Media job completed — task_id=%s, url=%s", task.task_id, image_url)
 
     except Exception as exc:
         # ── FAILED ────────────────────────────────────────────────────────
