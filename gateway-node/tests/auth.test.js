@@ -485,3 +485,137 @@ describe('Rate limiting', () => {
   });
 
 });
+
+// ── POST /api/auth/logout ─────────────────────────────────────────────────────
+
+describe('POST /api/auth/logout', () => {
+
+  it('should clear the refreshToken from the database', async () => {
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `logout-setup-${Date.now()}`)
+      .send(validUser);
+    const loginRes = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `logout-login-${Date.now()}`)
+      .send({ email: validUser.email, password: validUser.password });
+
+    const { token, refreshToken } = loginRes.body;
+
+    const res = await request(app)
+      .post('/api/auth/logout')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+
+    const User = require('../models/User');
+    const user = await User.findOne({ email: validUser.email });
+    expect(user.refreshToken).toBeNull();
+  });
+
+  it('should make the old refresh token invalid after logout', async () => {
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `logout-invalid-setup-${Date.now()}`)
+      .send(validUser);
+    const loginRes = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `logout-invalid-login-${Date.now()}`)
+      .send({ email: validUser.email, password: validUser.password });
+
+    const { token, refreshToken } = loginRes.body;
+
+    // Logout
+    await request(app)
+      .post('/api/auth/logout')
+      .set('Authorization', `Bearer ${token}`);
+
+    // Attempt to refresh with the now-invalidated token
+    const refreshRes = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken });
+
+    expect(refreshRes.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('should return 401 when not authenticated', async () => {
+    const res = await request(app).post('/api/auth/logout');
+    expect(res.status).toBe(401);
+  });
+
+});
+
+// ── Input validation ──────────────────────────────────────────────────────────
+
+describe('Input validation on /signup', () => {
+
+  it('should reject an invalid email format with 400', async () => {
+    const res = await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `val-email-${Date.now()}`)
+      .send({ name: 'Test', email: 'not-an-email', password: 'password123' });
+    expect(res.status).toBe(400);
+    const bodyStr = JSON.stringify(res.body).toLowerCase();
+    expect(bodyStr.includes('email') || bodyStr.includes('valid')).toBe(true);
+  });
+
+  it('should reject a password shorter than 6 characters with 400', async () => {
+    const res = await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `val-pw-${Date.now()}`)
+      .send({ name: 'Test', email: 'valid@example.com', password: '123' });
+    expect(res.status).toBe(400);
+    const bodyStr = JSON.stringify(res.body).toLowerCase();
+    expect(
+      bodyStr.includes('password') || bodyStr.includes('length') || bodyStr.includes('short')
+    ).toBe(true);
+  });
+
+  it('should accept a valid email and password of exactly 6 characters', async () => {
+    const res = await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `val-ok-${Date.now()}`)
+      .send({ name: 'Test', email: 'valid6@example.com', password: 'abc123' });
+    expect(res.status).toBeLessThan(400);
+  });
+
+});
+
+// ── Secret separation ─────────────────────────────────────────────────────────
+
+describe('JWT secret separation', () => {
+
+  it('access token and refresh token must use different secrets', async () => {
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `secret-sep-setup-${Date.now()}`)
+      .send(validUser);
+    const loginRes = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `secret-sep-login-${Date.now()}`)
+      .send({ email: validUser.email, password: validUser.password });
+
+    const { token, refreshToken } = loginRes.body;
+
+    // Verify access token with JWT_SECRET — must succeed
+    expect(() =>
+      jwt.verify(token, process.env.JWT_SECRET)
+    ).not.toThrow();
+
+    // Verify refresh token with JWT_REFRESH_SECRET — must succeed
+    expect(() =>
+      jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET)
+    ).not.toThrow();
+
+    // Cross-verify: access token must NOT verify with JWT_REFRESH_SECRET
+    expect(() =>
+      jwt.verify(token, process.env.JWT_REFRESH_SECRET)
+    ).toThrow();
+
+    // Cross-verify: refresh token must NOT verify with JWT_SECRET
+    expect(() =>
+      jwt.verify(refreshToken, process.env.JWT_SECRET)
+    ).toThrow();
+  });
+
+});
