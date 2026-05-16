@@ -87,12 +87,13 @@ async def upload_document(file: UploadFile) -> dict:
         )
 
     store = get_document_store()
-    doc_id = store.store_document(text)
+    doc_id = await store.store_document(text, filename=filename)
 
     logger.info("Document uploaded — doc_id=%s, filename=%s", doc_id, filename)
 
     return {
         "doc_id": doc_id,
         "filename": filename,
-        "message": "Document processed successfully.",
+        "char_count": len(text),
+        "message": "Document processed and persisted successfully.",
     }

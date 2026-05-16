@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
 
-from app.agents.swarm import stream_swarm
+from app.agents.swarm import stream_swarm, get_last_stream_usage
 from app.api.deps import get_request_id, verify_api_key, get_user_key
 from app.core.logging import get_logger
 from app.schemas.chat import ChatMessage, ChatRequest
@@ -72,8 +72,6 @@ async def sse_chat(
 
     async def event_generator():
         full_response = ""
-        prompt_tokens = 0
-        completion_tokens = 0
         try:
             async for delta in stream_swarm(body):
                 if delta:
@@ -93,13 +91,12 @@ async def sse_chat(
         if full_response:
             await append_to_history(session_id, "assistant", full_response)
 
-        # Token metering — streaming doesn't return usage directly; approximate
-        # from response length. Real counts available via non-streaming endpoint.
-        approx_completion = len(full_response.split())
+        # Exact token counts from the completed RunResultStreaming
+        usage = get_last_stream_usage()
         await record_token_usage(
             session_id=session_id,
-            prompt_tokens=0,          # not available in streaming mode
-            completion_tokens=approx_completion,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
             user_id=user_id,
         )
 

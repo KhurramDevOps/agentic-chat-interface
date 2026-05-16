@@ -45,6 +45,8 @@ HAND OFF only when the user's intent clearly matches one of these:
   ONLY when the user explicitly needs live/current data from the web:
   "search for", "look up online", "latest news on", "current price of",
   real-time weather, live sports scores, or a specific URL to fetch.
+  Also route here for: math calculations, running Python code/scripts,
+  data analysis, or fetching content from a URL the user provides.
   Do NOT route here for general knowledge you already know.
 
 → ResearchAgent (document analysis)

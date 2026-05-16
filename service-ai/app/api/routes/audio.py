@@ -1,23 +1,19 @@
 """
 app/api/routes/audio.py
 ────────────────────────
-Voice-to-text transcription endpoint using Groq Whisper.
+Audio endpoints: speech-to-text (Whisper) and text-to-speech (PlayAI via Groq).
 
-Endpoint:
-  POST /api/v1/audio/transcriptions
-
-Accepts an audio file upload (.m4a, .mp3, .wav, .webm, .ogg) and returns
-the transcribed text so the frontend can inject it directly into the chat box.
-
-Uses the Groq API's whisper-large-v3 model via the OpenAI-compatible client.
-Falls back gracefully if the provider is not Groq (returns a clear error).
+Endpoints:
+  POST /api/v1/audio/transcriptions  — audio file → transcribed text
+  POST /api/v1/audio/speech          — text → streaming audio (MP3)
 """
 
 from __future__ import annotations
 
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.deps import verify_api_key
@@ -27,12 +23,6 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
-_SUPPORTED_TYPES = {
-    "audio/mpeg", "audio/mp4", "audio/mp3", "audio/wav",
-    "audio/x-wav", "audio/webm", "audio/ogg", "audio/m4a",
-    "video/mp4",   # some browsers send m4a as video/mp4
-    "application/octet-stream",  # generic fallback
-}
 _WHISPER_MODEL = "whisper-large-v3"
 
 
@@ -74,7 +64,6 @@ async def transcribe_audio(
             },
         )
 
-    # Validate content type (lenient — browsers send inconsistent MIME types)
     content_type = (file.content_type or "").lower()
     filename = file.filename or "audio.mp3"
 
@@ -83,7 +72,6 @@ async def transcribe_audio(
         filename, content_type,
     )
 
-    # Read file into memory
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(
@@ -91,7 +79,7 @@ async def transcribe_audio(
             detail={"error": {"code": "EMPTY_FILE", "message": "Uploaded file is empty.", "request_id": "-"}},
         )
 
-    if len(audio_bytes) > 25 * 1024 * 1024:  # Groq's 25 MB limit
+    if len(audio_bytes) > 25 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail={"error": {"code": "FILE_TOO_LARGE", "message": "Audio file exceeds 25 MB limit.", "request_id": "-"}},
@@ -101,7 +89,6 @@ async def transcribe_audio(
         from groq import AsyncGroq  # type: ignore[import-untyped]
 
         client = AsyncGroq(api_key=settings.groq_api_key)
-
         transcription = await client.audio.transcriptions.create(
             file=(filename, io.BytesIO(audio_bytes)),
             model=_WHISPER_MODEL,
@@ -112,33 +99,84 @@ async def transcribe_audio(
         language = getattr(transcription, "language", None)
         duration = getattr(transcription, "duration", None)
 
-        logger.info(
-            "Transcription complete — chars=%d, language=%s, duration=%s",
-            len(text), language, duration,
-        )
-
+        logger.info("Transcription complete — chars=%d, language=%s", len(text), language)
         return TranscriptionResponse(text=text, language=language, duration=duration)
 
     except ImportError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error": {
-                    "code": "GROQ_SDK_MISSING",
-                    "message": "groq package is not installed. Run: uv add groq",
-                    "request_id": "-",
-                }
-            },
+            detail={"error": {"code": "GROQ_SDK_MISSING",
+                               "message": "groq package is not installed. Run: uv add groq", "request_id": "-"}},
         )
     except Exception as exc:
         logger.exception("Transcription failed — filename=%s", filename)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error": {
-                    "code": "TRANSCRIPTION_ERROR",
-                    "message": f"Whisper transcription failed: {exc}",
-                    "request_id": "-",
-                }
-            },
+            detail={"error": {"code": "TRANSCRIPTION_ERROR",
+                               "message": f"Whisper transcription failed: {exc}", "request_id": "-"}},
+        ) from exc
+
+
+@router.post(
+    "/speech",
+    summary="Convert text to speech via gTTS",
+    tags=["Audio"],
+    dependencies=[Depends(verify_api_key)],
+)
+async def text_to_speech(
+    text: str = Form(..., description="Text to synthesise into speech."),
+    lang: str = Form(default="en", description="BCP-47 language code, e.g. 'en', 'ur', 'fr'."),
+) -> StreamingResponse:
+    """
+    Convert text to speech using Google Text-to-Speech (gTTS).
+
+    Returns a streaming MP3 audio response the browser can play directly.
+
+    - text: The text to speak (form field)
+    - lang: Language code (default: 'en')
+    """
+    if not text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "EMPTY_TEXT", "message": "text field cannot be empty.", "request_id": "-"}},
+        )
+
+    logger.info("TTS request — chars=%d, lang=%s", len(text), lang)
+
+    try:
+        import asyncio  # noqa: PLC0415
+        from gtts import gTTS  # type: ignore[import-untyped]
+
+        buf = io.BytesIO()
+
+        # gTTS is synchronous — run in executor to avoid blocking the event loop
+        def _synthesise() -> None:
+            tts = gTTS(text=text[:4096], lang=lang, slow=False)
+            tts.write_to_fp(buf)
+            buf.seek(0)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _synthesise)
+
+        audio_bytes = buf.read()
+        logger.info("TTS complete — audio_bytes=%d", len(audio_bytes))
+
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=speech.mp3"},
+        )
+
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": {"code": "GTTS_MISSING",
+                               "message": "gtts package is not installed. Run: uv add gtts", "request_id": "-"}},
+        )
+    except Exception as exc:
+        logger.exception("TTS failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": {"code": "TTS_ERROR",
+                               "message": f"Text-to-speech failed: {exc}", "request_id": "-"}},
         ) from exc

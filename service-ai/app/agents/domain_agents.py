@@ -71,6 +71,189 @@ def tavily_search(query: str) -> str:
         return f"Search encountered an error: {exc}"
 
 
+@function_tool
+def fetch_url(url: str) -> str:
+    """
+    Fetch the text content of a web page and return it stripped of HTML tags.
+
+    Use this when the user provides a specific URL they want you to read,
+    or when you need to retrieve content from a known source.
+
+    CRITICAL: The `url` argument must be a raw URL string ONLY.
+    DO NOT use markdown formatting, brackets, parentheses, or HTML.
+    CORRECT:   "https://example.com"
+    INCORRECT: "[https://example.com](https://example.com)"
+
+    Args:
+        url: The full URL to fetch (must start with http:// or https://).
+
+    Returns:
+        Plain text content of the page (truncated to 8000 chars).
+    """
+    import re  # noqa: PLC0415
+    import httpx  # noqa: PLC0415
+
+    ensure_str(url, "fetch_url.url")
+    url = url.strip()
+
+    # Strip any markdown link formatting the LLM may have injected:
+    # e.g. "[text](https://...)" → "https://..."
+    # or   "[https://...](https://...)" → "https://..."
+    md_match = re.search(r'\(?(https?://[^\s\)\]>]+)', url)
+    if md_match:
+        url = md_match.group(1)
+
+    # Remove any remaining stray brackets or angle brackets
+    url = re.sub(r'[\[\]<>]', '', url).strip()
+
+    if not url.startswith(("http://", "https://")):
+        return "Error: URL must start with http:// or https://"
+
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
+            resp.raise_for_status()
+            html = resp.text
+
+        # Strip HTML tags
+        text = re.sub(r"<[^>]+>", " ", html)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        _MAX = 8000
+        truncated = text[:_MAX]
+        suffix = "... [truncated]" if len(text) > _MAX else ""
+
+        logger.info("fetch_url — url=%s, chars=%d", url, len(text))
+        return f"Content from {url}:\n\n{truncated}{suffix}"
+
+    except httpx.HTTPStatusError as exc:
+        return f"Error: HTTP {exc.response.status_code} fetching {url}"
+    except Exception as exc:
+        logger.warning("fetch_url failed — url=%s, error=%s", url, exc)
+        return f"Error fetching URL: {exc}"
+
+
+@function_tool
+def calculate(expression: str) -> str:
+    """
+    Safely evaluate a mathematical expression and return the result.
+
+    Supports: +, -, *, /, //, %, **, parentheses, and basic numeric literals.
+    Does NOT support function calls, imports, or any non-math operations.
+
+    Args:
+        expression: A math expression string, e.g. "(3 + 4) * 2 / 1.5"
+
+    Returns:
+        The numeric result as a string, or an error message.
+    """
+    import ast  # noqa: PLC0415
+    import operator as op  # noqa: PLC0415
+
+    ensure_str(expression, "calculate.expression")
+
+    _OPERATORS = {
+        ast.Add: op.add,
+        ast.Sub: op.sub,
+        ast.Mult: op.mul,
+        ast.Div: op.truediv,
+        ast.FloorDiv: op.floordiv,
+        ast.Mod: op.mod,
+        ast.Pow: op.pow,
+        ast.USub: op.neg,
+        ast.UAdd: op.pos,
+    }
+
+    def _eval(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.operand))
+        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+    try:
+        tree = ast.parse(expression.strip(), mode="eval")
+        result = _eval(tree.body)
+        # Return int representation when result is a whole number
+        if result == int(result):
+            return str(int(result))
+        return str(round(result, 10))
+    except ZeroDivisionError:
+        return "Error: division by zero"
+    except Exception as exc:
+        return f"Error evaluating expression: {exc}"
+
+
+@function_tool
+def run_python(code: str) -> str:
+    """
+    Execute a sandboxed Python script and return its stdout output.
+
+    Use this for data analysis, calculations, string processing, or any
+    task that benefits from running actual Python code.
+
+    Restrictions:
+      - 3-second execution timeout
+      - No network access (subprocess isolation)
+      - Only stdout is captured; imports of dangerous modules will fail
+
+    Args:
+        code: Valid Python source code to execute.
+
+    Returns:
+        The stdout output of the script, or an error/timeout message.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+
+    ensure_str(code, "run_python.code")
+
+    # Reject obviously dangerous patterns before even spawning a process
+    _BLOCKED = ["import os", "import sys", "import subprocess", "import socket",
+                "import requests", "import httpx", "__import__", "open(", "exec(",
+                "eval(", "compile("]
+    code_lower = code.lower()
+    for pattern in _BLOCKED:
+        if pattern in code_lower:
+            return f"Error: '{pattern}' is not allowed in sandboxed execution."
+
+    dedented = textwrap.dedent(code)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", dedented],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            # No extra env — inherits minimal env from the parent process
+        )
+        output = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        if result.returncode != 0:
+            return f"Script error (exit {result.returncode}):\n{stderr or output}"
+
+        if not output and stderr:
+            return f"Script produced no output. Stderr:\n{stderr}"
+
+        _MAX_OUTPUT = 4000
+        if len(output) > _MAX_OUTPUT:
+            output = output[:_MAX_OUTPUT] + "\n... [output truncated]"
+
+        logger.info("run_python — returncode=%d, output_len=%d", result.returncode, len(output))
+        return output or "(script ran successfully with no output)"
+
+    except subprocess.TimeoutExpired:
+        return "Error: script exceeded the 3-second timeout."
+    except Exception as exc:
+        logger.warning("run_python failed — %s", exc)
+        return f"Error running script: {exc}"
+
+
 # ── Document analysis tool (Phase 6) ─────────────────────────────────────────
 
 @function_tool
@@ -92,7 +275,7 @@ def analyze_document(doc_id: str, query: str) -> str:
     ensure_str(query, "analyze_document.query")
 
     store = get_document_store()
-    text = store.get_document(doc_id)
+    text = store.get_document_sync(doc_id)
 
     if text is None:
         return (
@@ -258,23 +441,27 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
         mcp_servers:   List of MCPServerStdio instances injected at runtime.
         model_settings: Optional ModelSettings (e.g. parallel_tool_calls=False for Groq).
     """
+    base_tools = [tavily_search, analyze_document, fetch_url, calculate, run_python]
+    instructions = (
+        "You are a research and analysis specialist. "
+        "Use tavily_search for live web data. "
+        "Use fetch_url to read a specific URL the user provides. "
+        "Use calculate for any arithmetic — never do math in your head. "
+        "Use run_python for data analysis, transformations, or complex calculations. "
+        "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
+        "Always cite your sources and present findings clearly."
+    )
+
     if mcp_servers:
         return Agent(
             name="ResearchAgent",
             handoff_description=(
-                "Specialist for web search, current events, factual lookups, "
-                "deep research, and analyzing uploaded PDF documents."
+                "Specialist for web search, URL fetching, data analysis, math, "
+                "code execution, and analyzing uploaded PDF documents."
             ),
-            instructions=(
-                "You are a research specialist with access to Tavily's search and "
-                "extraction tools. Use tavily_search to find accurate, up-to-date "
-                "information and tavily_extract to pull detailed content from specific URLs. "
-                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
-                "Always cite your sources and present findings clearly. "
-                "When research is complete, provide a comprehensive summary."
-            ),
+            instructions=instructions,
             mcp_servers=mcp_servers,
-            tools=[analyze_document],
+            tools=[analyze_document, fetch_url, calculate, run_python],
             model=model,
             model_settings=model_settings,
         )
@@ -282,17 +469,11 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
         return Agent(
             name="ResearchAgent",
             handoff_description=(
-                "Specialist for web search, current events, factual lookups, "
-                "deep research, and analyzing uploaded PDF documents."
+                "Specialist for web search, URL fetching, data analysis, math, "
+                "code execution, and analyzing uploaded PDF documents."
             ),
-            instructions=(
-                "You are a research specialist. Use tavily_search to find accurate, "
-                "up-to-date information from the web. "
-                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
-                "Always cite your sources and present findings clearly. "
-                "When research is complete, provide a comprehensive summary."
-            ),
-            tools=[tavily_search, analyze_document],
+            instructions=instructions,
+            tools=base_tools,
             model=model,
             model_settings=model_settings,
         )
