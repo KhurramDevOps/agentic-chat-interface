@@ -1,12 +1,13 @@
 import React from 'react';
 import { Form, Button } from 'react-bootstrap';
-import '../styles/AuthPortal.css';
+import '../../styles/AuthPortal.css';
 
 export default function AuthForm({
   isLogin,
   name,
   email,
   password,
+  isLoading,
   onNameChange,
   onEmailChange,
   onPasswordChange,
@@ -57,8 +58,8 @@ export default function AuthForm({
       </Form.Group>
 
       {/* Submit */}
-      <Button type="submit" className="auth-submit-btn">
-        {isLogin ? 'Sign In' : 'Register'}
+      <Button type="submit" className="auth-submit-btn" disabled={isLoading}>
+        {isLoading ? 'Please wait...' : (isLogin ? 'Sign In' : 'Register')}
       </Button>
 
     </Form>

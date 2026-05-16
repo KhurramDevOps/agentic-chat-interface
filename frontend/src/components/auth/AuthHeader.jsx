@@ -1,5 +1,5 @@
 import React from 'react';
-import '../styles/AuthPortal.css';
+import '../../styles/AuthPortal.css';
 
 export default function AuthHeader({ isLogin }) {
   return (
