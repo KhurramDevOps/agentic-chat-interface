@@ -1,17 +1,16 @@
 """
-app/core/logging.py  (T009)
-───────────────────────────
-Structured JSON-capable logging configuration for service-ai.
+app/core/logging.py
+────────────────────
+Emoji-enhanced, visually scannable logging for service-ai.
 
-Provides:
-  - configure_logging()  — called once at app startup via lifespan
-  - get_logger()         — convenience wrapper for named loggers
-  - RequestIdFilter      — injects request_id into every log record
+Dev output example:
+  2026-05-16T10:23:01 🟢 INFO     💬 app.api.routes.chat      Processing request...
+  2026-05-16T10:23:02 🧠 INFO     🧠 app.agents.swarm         run_swarm complete
+  2026-05-16T10:23:02 🔴 ERROR    💾 app.services.history     MongoDB timeout
 
-Design notes:
-  - In development, output is human-readable (coloured if colorlog is present).
-  - In production, output is newline-delimited JSON for log aggregators.
-  - The root logger is configured; all app loggers inherit from it.
+Production output: newline-delimited JSON (unchanged).
+
+Module → emoji mapping lets your eyes jump straight to the relevant subsystem.
 """
 
 from __future__ import annotations
@@ -26,17 +25,64 @@ if TYPE_CHECKING:
     from app.core.config import Settings
 
 
+# ── Module → emoji map ────────────────────────────────────────────────────────
+
+_MODULE_EMOJI: dict[str, str] = {
+    # Agents / swarm
+    "app.agents":          "🧠",
+    "app.agents.swarm":    "🧠",
+    "app.agents.triage":   "🧠",
+    "app.agents.domain":   "🧠",
+    # API routes
+    "app.api.routes.chat": "💬",
+    "app.api.routes.sse":  "💬",
+    "app.api.routes.stream": "💬",
+    "app.api.routes.audio": "🎤",
+    "app.api.routes.vision": "🎨",
+    "app.api.routes.files": "📄",
+    "app.api.routes.users": "👤",
+    "app.api.routes.health": "🏥",
+    "app.api":             "🌐",
+    # Services
+    "app.services.history": "💾",
+    "app.services.user":    "👤",
+    "app.services.file":    "📄",
+    "app.services.mcp":     "🔌",
+    "app.services.stream":  "📡",
+    "app.services":         "⚙️ ",
+    # Workers
+    "app.workers.media":   "🎨",
+    "app.workers":         "⚙️ ",
+    # Core
+    "app.core.config":     "⚙️ ",
+    "app.core.llm":        "🤖",
+    "app.core":            "⚙️ ",
+    # App root
+    "app.main":            "🚀",
+}
+
+_LEVEL_EMOJI: dict[str, str] = {
+    "DEBUG":    "🔵",
+    "INFO":     "🟢",
+    "WARNING":  "🟡",
+    "ERROR":    "🔴",
+    "CRITICAL": "🔥",
+}
+
+
+def _module_emoji(name: str) -> str:
+    """Return the best-matching emoji for a logger name."""
+    # Walk from most-specific to least-specific prefix
+    for prefix in sorted(_MODULE_EMOJI, key=len, reverse=True):
+        if name.startswith(prefix):
+            return _MODULE_EMOJI[prefix]
+    return "📋"
+
+
 # ── Request-ID context filter ─────────────────────────────────────────────────
 
 class RequestIdFilter(logging.Filter):
-    """
-    Injects a `request_id` field into every LogRecord so that
-    structured log lines can be correlated to a specific API request.
-
-    Usage:
-        logger = logging.getLogger(__name__)
-        logger.addFilter(RequestIdFilter(request_id="abc-123"))
-    """
+    """Injects a `request_id` field into every LogRecord."""
 
     def __init__(self, request_id: str = "-") -> None:
         super().__init__()
@@ -47,13 +93,10 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
-# ── JSON formatter ────────────────────────────────────────────────────────────
+# ── JSON formatter (production) ───────────────────────────────────────────────
 
 class JsonFormatter(logging.Formatter):
-    """
-    Emits each log record as a single-line JSON object.
-    Fields: timestamp, level, logger, message, request_id, [exc_info].
-    """
+    """Emits each log record as a single-line JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict = {
@@ -70,20 +113,41 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-# ── Human-readable formatter (dev) ───────────────────────────────────────────
+# ── Emoji formatter (development) ─────────────────────────────────────────────
 
-_DEV_FORMAT = (
-    "%(asctime)s | %(levelname)-8s | %(name)s | [%(request_id)s] %(message)s"
-)
+class EmojiFormatter(logging.Formatter):
+    """
+    Human-readable formatter with emoji level indicators and module icons.
 
+    Output format:
+      {timestamp} {level_emoji} {level:<8} {module_emoji} {logger:<35} {message}
 
-class DevFormatter(logging.Formatter):
-    """Plain-text formatter with request_id for local development."""
+    Example:
+      2026-05-16T10:23:01 🟢 INFO     🧠 app.agents.swarm          Swarm ready
+      2026-05-16T10:23:02 🔴 ERROR    💾 app.services.history_serv  MongoDB timeout
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         if not hasattr(record, "request_id"):
             record.request_id = "-"  # type: ignore[attr-defined]
-        return super().format(record)
+
+        ts = datetime.fromtimestamp(record.created).strftime("%Y-%m-%dT%H:%M:%S")
+        level_emoji = _LEVEL_EMOJI.get(record.levelname, "⬜")
+        mod_emoji = _module_emoji(record.name)
+        level = record.levelname.ljust(8)
+
+        # Truncate long logger names to keep columns aligned
+        logger_name = record.name
+        if len(logger_name) > 32:
+            parts = logger_name.split(".")
+            logger_name = ".".join(p[:1] for p in parts[:-1]) + "." + parts[-1]
+        logger_name = logger_name.ljust(32)
+
+        msg = record.getMessage()
+        if record.exc_info:
+            msg += "\n" + self.formatException(record.exc_info)
+
+        return f"{ts} {level_emoji} {level} {mod_emoji} {logger_name} {msg}"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -92,29 +156,23 @@ def configure_logging(settings: "Settings") -> None:
     """
     Configure the root logger for the entire service.
     Call once from the FastAPI lifespan startup handler.
-
-    Args:
-        settings: Validated Settings instance from app.core.config.
     """
     root = logging.getLogger()
     root.setLevel(settings.log_level)
-
-    # Remove any handlers added by earlier basicConfig calls
     root.handlers.clear()
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.addFilter(RequestIdFilter())  # default request_id = "-"
+    handler.addFilter(RequestIdFilter())
 
     if settings.is_production:
         handler.setFormatter(JsonFormatter())
     else:
-        formatter = DevFormatter(fmt=_DEV_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S")
-        handler.setFormatter(formatter)
+        handler.setFormatter(EmojiFormatter())
 
     root.addHandler(handler)
 
     # Silence noisy third-party loggers
-    for noisy in ("uvicorn.access", "httpx", "httpcore", "litellm"):
+    for noisy in ("uvicorn.access", "httpx", "httpcore", "litellm", "pymongo"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

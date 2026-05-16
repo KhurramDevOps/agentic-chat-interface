@@ -164,6 +164,24 @@ def get_request_id(request: Request) -> str:
     return _extract_request_id(request)
 
 
+def get_user_key(request: Request) -> str:
+    """
+    Rate-limit key function for slowapi.
+
+    Priority:
+      1. X-User-ID header  (set by gateway after JWT validation)
+      2. X-API-Key header  (service-to-service or dev clients)
+      3. Remote IP address (anonymous fallback)
+    """
+    return (
+        request.headers.get("x-user-id")
+        or request.headers.get("x-api-key")
+        or request.headers.get("X-API-Key")
+        or request.client.host
+        if request.client else "unknown"
+    )
+
+
 async def verify_api_key(request: Request) -> None:
     """
     Dependency that enforces API key authentication.

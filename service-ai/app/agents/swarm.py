@@ -124,11 +124,12 @@ def get_swarm() -> Agent:
     wait=wait_exponential(multiplier=2, min=2, max=8),
     reraise=True,
 )
-async def _run_with_retry(agent: Agent, input_messages: list) -> RunResult:
+async def _run_with_retry(agent: Agent, input_messages: list, context_variables: dict | None = None) -> RunResult:
     """Execute Runner.run with exponential backoff on 429/500/503."""
     return await Runner.run(
         starting_agent=agent,
         input=input_messages,
+        context=context_variables,
         max_turns=10,
     )
 
@@ -155,12 +156,9 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
     context_id = request.memory_context_id or request.request_id
 
-    # Build the input as a list of OpenAI-style message dicts.
-    # Prepend a system message with the session_id so memory tools
-    # always have access to it without polluting the user message.
     system_msg = {
         "role": "system",
-        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+        "content": f"session_id: {context_id}",
     }
 
     history_msgs = [
@@ -183,8 +181,15 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         len(request.messages),
     )
 
-    result: RunResult = await _run_with_retry(triage, input_messages)
+    # context_variables are injected into tool functions via context_variables: dict param
+    # — hidden from the LLM schema, available to tools at runtime.
+    context_variables = {
+        "session_id": context_id,
+        "client_id": request.request_id,  # WebSocket client_id == request_id in stream.py
+        "request_id": request.request_id,
+    }
 
+    result: RunResult = await _run_with_retry(triage, input_messages, context_variables)
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
@@ -193,11 +198,21 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     handoff_chain = _extract_handoff_chain(result)
     handoff_occurred = len(handoff_chain) > 1
 
+    # Extract token usage from all model responses in this run
+    prompt_tokens = 0
+    completion_tokens = 0
+    for model_response in result.raw_responses:
+        usage = getattr(model_response, "usage", None)
+        if usage:
+            prompt_tokens += getattr(usage, "input_tokens", 0)
+            completion_tokens += getattr(usage, "output_tokens", 0)
+
     logger.info(
-        "run_swarm complete — last_agent=%s, handoff=%s, turns=%d",
+        "run_swarm complete — last_agent=%s, handoff=%s, turns=%d, tokens=%d",
         last_agent.name,
         handoff_occurred,
         result._current_turn,
+        prompt_tokens + completion_tokens,
     )
 
     return AgentResponse(
@@ -210,6 +225,11 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
             turns_used=result._current_turn,
         ),
         model=request.model,
+        usage={
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
     )
 
 
@@ -221,9 +241,13 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Tool calls and handoffs are handled internally — only final text
     tokens are yielded to the caller.
 
+    After the iterator is exhausted, the caller can read exact token usage
+    from the `_last_stream_result` module variable via get_last_stream_usage().
+
     Usage:
         async for delta in stream_swarm(request):
             await websocket.send_text(delta)
+        usage = get_last_stream_usage()
 
     Args:
         request: Validated ChatRequest with full history merged in.
@@ -231,6 +255,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Yields:
         str — incremental text chunks from the LLM.
     """
+    global _last_stream_result
     from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
 
     triage = get_swarm()
@@ -238,7 +263,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
 
     system_msg = {
         "role": "system",
-        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+        "content": f"session_id: {context_id}",
     }
     history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
     input_messages = [system_msg] + history_msgs
@@ -248,7 +273,12 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         request.request_id, context_id, len(request.messages),
     )
 
-    # Apply Groq-compatible model settings via run_config
+    context_variables = {
+        "session_id": context_id,
+        "client_id": request.request_id,
+        "request_id": request.request_id,
+    }
+
     from app.core.config import get_settings as _get_settings  # noqa: PLC0415
     _settings = _get_settings()
     run_config = None
@@ -259,6 +289,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     result = Runner.run_streamed(
         starting_agent=triage,
         input=input_messages,
+        context=context_variables,
         max_turns=10,
         run_config=run_config,
     )
@@ -270,25 +301,54 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         data = event.data
         delta_content: str | None = None
 
-        # Chat Completions API: choices[0].delta.content
         if hasattr(data, "choices") and data.choices:
             delta = data.choices[0].delta
             if delta and delta.content:
                 delta_content = delta.content
-
-        # Responses API: ResponseTextDeltaEvent (type="response.output_text.delta")
         elif hasattr(data, "type") and data.type == "response.output_text.delta":
             delta_content = getattr(data, "delta", None)
 
         if delta_content:
             yield delta_content
 
-    # stream_events() exhausts when is_complete — no extra call needed
+    # Store result so caller can read exact token usage after stream completes
+    _last_stream_result = result
+
     logger.info(
         "stream_swarm complete — request_id=%s, last_agent=%s",
         request.request_id,
         result.last_agent.name if result.last_agent else "unknown",
     )
+
+
+# Module-level storage for the most recent stream result (per-process, not per-request).
+# Safe for single-worker deployments; for multi-worker use a request-scoped store.
+_last_stream_result = None
+
+
+def get_last_stream_usage() -> dict[str, int]:
+    """
+    Return exact token usage from the most recently completed stream_swarm call.
+    Must be called immediately after the stream is exhausted.
+    Returns zeros if no result is available.
+    """
+    result = _last_stream_result
+    if result is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    for model_response in getattr(result, "raw_responses", []):
+        usage = getattr(model_response, "usage", None)
+        if usage:
+            prompt_tokens += getattr(usage, "input_tokens", 0)
+            completion_tokens += getattr(usage, "output_tokens", 0)
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
 
 
 def _extract_handoff_chain(result: RunResult) -> list[str]:

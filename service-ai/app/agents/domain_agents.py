@@ -15,7 +15,9 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from agents import Agent, function_tool
+import httpx
+
+from agents import Agent, RunContextWrapper, function_tool
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -71,6 +73,185 @@ def tavily_search(query: str) -> str:
         return f"Search encountered an error: {exc}"
 
 
+def _fetch_url_impl(url: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import re  # noqa: PLC0415
+
+    ensure_str(url, "fetch_url.url")
+    url = url.strip()
+
+    md_match = re.search(r'\(?(https?://[^\s\)\]>]+)', url)
+    if md_match:
+        url = md_match.group(1)
+    url = re.sub(r'[\[\]<>]', '', url).strip()
+
+    if not url.startswith(("http://", "https://")):
+        return "Error: URL must start with http:// or https://"
+
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
+            resp.raise_for_status()
+            html = resp.text
+
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        _MAX = 8000
+        truncated = text[:_MAX]
+        suffix = "... [truncated]" if len(text) > _MAX else ""
+
+        logger.info("fetch_url — url=%s, chars=%d", url, len(text))
+        return f"Content from {url}:\n\n{truncated}{suffix}"
+
+    except httpx.HTTPStatusError as exc:
+        return f"Error: HTTP {exc.response.status_code} fetching {url}"
+    except Exception as exc:
+        logger.warning("fetch_url failed — url=%s, error=%s", url, exc)
+        return f"Error fetching URL: {exc}"
+
+
+@function_tool
+def fetch_url(url: str) -> str:
+    """
+    Fetch the text content of a web page and return it stripped of HTML tags.
+
+    Use this when the user provides a specific URL they want you to read,
+    or when you need to retrieve content from a known source.
+
+    CRITICAL: The `url` argument must be a raw URL string ONLY.
+    DO NOT use markdown formatting, brackets, parentheses, or HTML.
+    CORRECT:   "https://example.com"
+    INCORRECT: "[https://example.com](https://example.com)"
+
+    Args:
+        url: The full URL to fetch (must start with http:// or https://).
+
+    Returns:
+        Plain text content of the page (truncated to 8000 chars).
+    """
+    return _fetch_url_impl(url)
+
+
+def _calculate_impl(expression: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import ast  # noqa: PLC0415
+    import operator as op  # noqa: PLC0415
+
+    ensure_str(expression, "calculate.expression")
+
+    _OPERATORS = {
+        ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+        ast.Div: op.truediv, ast.FloorDiv: op.floordiv,
+        ast.Mod: op.mod, ast.Pow: op.pow,
+        ast.USub: op.neg, ast.UAdd: op.pos,
+    }
+
+    def _eval(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.operand))
+        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+
+    try:
+        tree = ast.parse(expression.strip(), mode="eval")
+        result = _eval(tree.body)
+        if result == int(result):
+            return str(int(result))
+        return str(round(result, 10))
+    except ZeroDivisionError:
+        return "Error: division by zero"
+    except Exception as exc:
+        return f"Error evaluating expression: {exc}"
+
+
+@function_tool
+def calculate(expression: str) -> str:
+    """
+    Safely evaluate a mathematical expression and return the result.
+
+    Supports: +, -, *, /, //, %, **, parentheses, and basic numeric literals.
+    Does NOT support function calls, imports, or any non-math operations.
+
+    Args:
+        expression: A math expression string, e.g. "(3 + 4) * 2 / 1.5"
+
+    Returns:
+        The numeric result as a string, or an error message.
+    """
+    return _calculate_impl(expression)
+
+
+def _run_python_impl(code: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+
+    ensure_str(code, "run_python.code")
+
+    _BLOCKED = ["import os", "import sys", "import subprocess", "import socket",
+                "import requests", "import httpx", "__import__", "open(", "exec(",
+                "eval(", "compile("]
+    code_lower = code.lower()
+    for pattern in _BLOCKED:
+        if pattern in code_lower:
+            return f"Error: '{pattern}' is not allowed in sandboxed execution."
+
+    dedented = textwrap.dedent(code)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", dedented],
+            capture_output=True, text=True, timeout=3,
+        )
+        output = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        if result.returncode != 0:
+            return f"Script error (exit {result.returncode}):\n{stderr or output}"
+        if not output and stderr:
+            return f"Script produced no output. Stderr:\n{stderr}"
+
+        _MAX_OUTPUT = 4000
+        if len(output) > _MAX_OUTPUT:
+            output = output[:_MAX_OUTPUT] + "\n... [output truncated]"
+
+        logger.info("run_python — returncode=%d, output_len=%d", result.returncode, len(output))
+        return output or "(script ran successfully with no output)"
+
+    except subprocess.TimeoutExpired:
+        return "Error: script exceeded the 3-second timeout."
+    except Exception as exc:
+        logger.warning("run_python failed — %s", exc)
+        return f"Error running script: {exc}"
+
+
+@function_tool
+def run_python(code: str) -> str:
+    """
+    Execute a sandboxed Python script and return its stdout output.
+
+    Use this for data analysis, calculations, string processing, or any
+    task that benefits from running actual Python code.
+
+    Restrictions:
+      - 3-second execution timeout
+      - No network access (subprocess isolation)
+      - Only stdout is captured; imports of dangerous modules will fail
+
+    Args:
+        code: Valid Python source code to execute.
+
+    Returns:
+        The stdout output of the script, or an error/timeout message.
+    """
+    return _run_python_impl(code)
+
+
 # ── Document analysis tool (Phase 6) ─────────────────────────────────────────
 
 @function_tool
@@ -92,7 +273,7 @@ def analyze_document(doc_id: str, query: str) -> str:
     ensure_str(query, "analyze_document.query")
 
     store = get_document_store()
-    text = store.get_document(doc_id)
+    text = store.get_document_sync(doc_id)
 
     if text is None:
         return (
@@ -124,7 +305,6 @@ def _add_memory_impl(context_id: str, content: str) -> str:
     """Raw implementation — testable without the @function_tool wrapper."""
     ensure_str(context_id, "add_memory.context_id")
     ensure_str(content, "add_memory.content")
-
     if not content.strip():
         return "Error: content cannot be empty."
 
@@ -161,17 +341,18 @@ def _add_memory_impl(context_id: str, content: str) -> str:
 
 
 @function_tool
-def add_memory(context_id: str, content: str) -> str:
+def add_memory(ctx: RunContextWrapper[dict], content: str) -> str:
     """
     Store a piece of information in the user's long-term memory.
 
     Args:
-        context_id: The conversation or user context bucket identifier.
-        content:    The information to remember.
+        content: The information to remember.
 
     Returns:
-        Confirmation message with the stored content summary.
+        Confirmation message.
     """
+    context_variables = ctx.context or {}
+    context_id = context_variables.get("session_id") or context_variables.get("context_id", "default")
     return _add_memory_impl(context_id=context_id, content=content)
 
 
@@ -232,17 +413,18 @@ def _search_memory_impl(context_id: str, query: str) -> str:
 
 
 @function_tool
-def search_memory(context_id: str, query: str) -> str:
+def search_memory(ctx: RunContextWrapper[dict], query: str) -> str:
     """
     Retrieve relevant memories for a given context and query.
 
     Args:
-        context_id: The conversation or user context bucket identifier.
-        query:      Natural-language query to search stored memories.
+        query: Natural-language query to search stored memories.
 
     Returns:
         Relevant memory entries as a formatted string.
     """
+    context_variables = ctx.context or {}
+    context_id = context_variables.get("session_id") or context_variables.get("context_id", "default")
     return _search_memory_impl(context_id=context_id, query=query)
 
 
@@ -257,23 +439,27 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
         mcp_servers:   List of MCPServerStdio instances injected at runtime.
         model_settings: Optional ModelSettings (e.g. parallel_tool_calls=False for Groq).
     """
+    base_tools = [tavily_search, analyze_document, fetch_url, calculate, run_python]
+    instructions = (
+        "You are a research and analysis specialist. "
+        "Use tavily_search for live web data. "
+        "Use fetch_url to read a specific URL the user provides. "
+        "Use calculate for any arithmetic — never do math in your head. "
+        "Use run_python for data analysis, transformations, or complex calculations. "
+        "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
+        "Always cite your sources and present findings clearly."
+    )
+
     if mcp_servers:
         return Agent(
             name="ResearchAgent",
             handoff_description=(
-                "Specialist for web search, current events, factual lookups, "
-                "deep research, and analyzing uploaded PDF documents."
+                "Specialist for web search, URL fetching, data analysis, math, "
+                "code execution, and analyzing uploaded PDF documents."
             ),
-            instructions=(
-                "You are a research specialist with access to Tavily's search and "
-                "extraction tools. Use tavily_search to find accurate, up-to-date "
-                "information and tavily_extract to pull detailed content from specific URLs. "
-                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
-                "Always cite your sources and present findings clearly. "
-                "When research is complete, provide a comprehensive summary."
-            ),
+            instructions=instructions,
             mcp_servers=mcp_servers,
-            tools=[analyze_document],
+            tools=[analyze_document, fetch_url, calculate, run_python],
             model=model,
             model_settings=model_settings,
         )
@@ -281,17 +467,11 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
         return Agent(
             name="ResearchAgent",
             handoff_description=(
-                "Specialist for web search, current events, factual lookups, "
-                "deep research, and analyzing uploaded PDF documents."
+                "Specialist for web search, URL fetching, data analysis, math, "
+                "code execution, and analyzing uploaded PDF documents."
             ),
-            instructions=(
-                "You are a research specialist. Use tavily_search to find accurate, "
-                "up-to-date information from the web. "
-                "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
-                "Always cite your sources and present findings clearly. "
-                "When research is complete, provide a comprehensive summary."
-            ),
-            tools=[tavily_search, analyze_document],
+            instructions=instructions,
+            tools=base_tools,
             model=model,
             model_settings=model_settings,
         )
@@ -306,12 +486,10 @@ def build_memory_agent(model: str, model_settings=None) -> Agent:
             "past conversation context, and long-term memory."
         ),
         instructions=(
-            "You are a memory specialist. The user's session_id is always provided "
-            "at the start of their message in the format [session_id: <id>]. "
-            "You MUST extract this session_id and use it as the context_id in ALL tool calls.\n\n"
+            "You are a memory specialist. The session context is automatically injected "
+            "— you do NOT need to pass any session_id or context_id to the tools.\n\n"
             "Rules you MUST follow:\n"
-            "1. When storing information: call add_memory with the session_id as context_id "
-            "and the information as content.\n"
+            "1. When storing information: call add_memory with only the content to remember.\n"
             "2. When the user asks about past projects, preferences, or 'what you know about me': "
             "you MUST call search_memory FIRST before providing any response. "
             "Never answer from memory without calling the tool.\n"
@@ -330,26 +508,21 @@ def build_memory_agent(model: str, model_settings=None) -> Agent:
 
 @function_tool
 def generate_media(
+    ctx: RunContextWrapper[dict],
     prompt: str,
-    client_id: str = "",
-    request_id: str = "",
     job_type: str = "image",
 ) -> str:
     """
     Dispatch a non-blocking image generation job via Pollinations.ai.
 
-    Returns immediately with a task_id and the direct image URL.
-    If a WebSocket client_id is provided, a background_update event will
-    be pushed to that client when the job completes.
+    Returns immediately with the direct image URL.
 
     Args:
-        prompt:     Description of the image to generate.
-        client_id:  WebSocket client_id to push the completion event to (optional).
-        request_id: Originating chat request ID for correlation (optional).
-        job_type:   "image" | "video" | "audio" (default: "image")
+        prompt:   Description of the image to generate.
+        job_type: "image" | "video" | "audio" (default: "image")
 
     Returns:
-        Acknowledgment string with the task_id and direct image URL.
+        Acknowledgment string with the direct image URL.
     """
     import urllib.parse  # noqa: PLC0415
 
@@ -358,40 +531,34 @@ def generate_media(
 
     ensure_str(prompt, "generate_media.prompt")
 
-    # Validate job_type
+    context_variables = ctx.context or {}
+    client_id = context_variables.get("client_id", "no-ws-client")
+    request_id = context_variables.get("request_id", "no-request-id")
+
     try:
         jt = JobType(job_type.lower())
     except ValueError:
         jt = JobType.IMAGE
 
-    # Build the Pollinations URL immediately — no waiting needed
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
         f"?width=1024&height=1024&nologo=true"
     )
 
-    # Dispatch background job only if a WebSocket client is connected
-    effective_client_id = client_id or "no-ws-client"
-    effective_request_id = request_id or "no-request-id"
-
     task_id = dispatch_media_job(
-        client_id=effective_client_id,
-        request_id=effective_request_id,
+        client_id=client_id,
+        request_id=request_id,
         job_type=jt,
         input_payload={"prompt": prompt, "job_type": jt.value, "url": image_url},
     )
 
-    logger.info(
-        "generate_media dispatched — task_id=%s, client_id=%s, job_type=%s",
-        task_id, effective_client_id, jt.value,
-    )
+    logger.info("generate_media dispatched — task_id=%s, job_type=%s", task_id, jt.value)
     return (
         f"Your image is being generated! Here is the direct link:\n\n"
         f"{image_url}\n\n"
         f"Task ID: {task_id}. The image will render once Pollinations processes it "
-        f"(usually within a few seconds). "
-        f"{'A WebSocket notification will be sent when ready.' if client_id else ''}"
+        f"(usually within a few seconds)."
     )
 
 

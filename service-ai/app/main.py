@@ -82,6 +82,11 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     from app.agents.swarm import initialise_swarm  # noqa: PLC0415
     await initialise_swarm()
 
+    # ── Register main event loop for media worker thread scheduling ───────
+    import asyncio  # noqa: PLC0415
+    from app.workers.media_worker import set_main_event_loop  # noqa: PLC0415
+    set_main_event_loop(asyncio.get_running_loop())
+
     logger.info("service-ai startup complete.")
 
     yield  # ← application runs here

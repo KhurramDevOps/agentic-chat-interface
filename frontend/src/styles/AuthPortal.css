@@ -1,0 +1,111 @@
+/* ── Page background ── */
+.auth-page {
+  background-color: #0a0e17;
+  min-height: 100vh;
+}
+
+/* ── Card ── */
+.auth-card {
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 16px;
+  padding: 36px 32px;
+}
+
+/* ── Header ── */
+.auth-header-title {
+  color: #f1f5f9;
+  font-size: 24px;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.auth-header-subtitle {
+  color: #64748b;
+  font-size: 14px;
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+/* ── Form labels ── */
+.auth-label {
+  color: #cbd5e1;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+/* ── Inputs ── */
+.auth-input {
+  background-color: #1e293b !important;
+  border: 1px solid #475569 !important;
+  border-radius: 8px !important;
+  color: #f1f5f9 !important;
+}
+
+.auth-input::placeholder {
+  color: #475569 !important;
+}
+
+.auth-input:focus {
+  background-color: #1e293b !important;
+  color: #f1f5f9 !important;
+  border-color: #7c3aed !important;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.25) !important;
+}
+
+/* Browser autofill override */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:hover,
+.auth-input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #1e293b inset !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
+  caret-color: #f1f5f9;
+}
+
+/* ── Submit button ── */
+.auth-submit-btn {
+  width: 100%;
+  background-color: #7c3aed;
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  color: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.auth-submit-btn:hover {
+  background-color: #6d28d9;
+}
+
+.auth-submit-btn:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.4);
+}
+
+/* ── Toggle link ── */
+.auth-toggle-text {
+  color: #64748b;
+  font-size: 14px;
+  text-align: center;
+  margin-top: 20px;
+  margin-bottom: 0;
+}
+
+.auth-toggle-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #a78bfa;
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.auth-toggle-btn:hover {
+  color: #c4b5fd;
+}

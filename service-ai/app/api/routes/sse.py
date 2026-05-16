@@ -23,17 +23,17 @@ import json
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
-from app.agents.swarm import stream_swarm
-from app.api.deps import get_request_id, verify_api_key
+from app.agents.swarm import stream_swarm, get_last_stream_usage
+from app.api.deps import get_request_id, verify_api_key, get_user_key
 from app.core.logging import get_logger
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.services.history_service import append_to_history, get_history
+from app.services.user_service import get_or_create_user, record_token_usage
 
 logger = get_logger(__name__)
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_user_key)
 
 
 @router.post(
@@ -57,6 +57,10 @@ async def sse_chat(
         body = body.model_copy(update={"request_id": request_id})
 
     session_id = body.memory_context_id or body.request_id
+    user_id = request.headers.get("x-user-id") or None
+
+    # Resolve / create user identity
+    await get_or_create_user(session_id=session_id, user_id=user_id)
 
     # Load and merge history
     history = await get_history(session_id)
@@ -86,6 +90,15 @@ async def sse_chat(
         await append_to_history(session_id, "user", body.last_user_message)
         if full_response:
             await append_to_history(session_id, "assistant", full_response)
+
+        # Exact token counts from the completed RunResultStreaming
+        usage = get_last_stream_usage()
+        await record_token_usage(
+            session_id=session_id,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            user_id=user_id,
+        )
 
     return StreamingResponse(
         event_generator(),

@@ -106,16 +106,17 @@ class TestAppendToHistory:
         assert len(saved_messages) <= MAX_HISTORY_MESSAGES
 
     @pytest.mark.asyncio
-    async def test_uses_push_slice_without_system_message(self):
-        """Without a system message, uses atomic $push + $slice."""
+    async def test_appends_message_without_system_message(self):
+        """Without a system message, appends via $set on the messages array."""
         col = _patch_collection(find_one_return=None)
         with patch("app.services.history_service._get_collection", return_value=col):
             from app.services.history_service import append_to_history
             await append_to_history("s1", "user", "Hello")
 
         call_filter, call_update = col.update_one.call_args.args[:2]
-        assert "$push" in call_update
-        assert "$slice" in call_update["$push"]["messages"]
+        assert "$set" in call_update
+        saved_messages = call_update["$set"]["messages"]
+        assert any(m["content"] == "Hello" for m in saved_messages)
 
 
 # ── Chat route integration ────────────────────────────────────────────────────
