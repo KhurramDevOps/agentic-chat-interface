@@ -113,36 +113,25 @@ class TestDetailedHealth:
 
 class TestCalculateTool:
 
-    def _calc(self, expr: str) -> str:
-        from app.agents.domain_agents import calculate
-        # function_tool wraps the function; call the underlying fn directly
-        return calculate.on_invoke_tool(MagicMock(), expr)  # type: ignore
-
     def test_basic_addition(self):
-        from app.agents.domain_agents import calculate
-        # Access the raw function via the tool's fn attribute
-        result = calculate.fn(expression="2 + 3")  # type: ignore
-        assert result == "5"
+        from app.agents.domain_agents import _calculate_impl
+        assert _calculate_impl("2 + 3") == "5"
 
     def test_float_division(self):
-        from app.agents.domain_agents import calculate
-        result = calculate.fn(expression="10 / 4")  # type: ignore
-        assert "2.5" in result
+        from app.agents.domain_agents import _calculate_impl
+        assert "2.5" in _calculate_impl("10 / 4")
 
     def test_power(self):
-        from app.agents.domain_agents import calculate
-        result = calculate.fn(expression="2 ** 10")  # type: ignore
-        assert result == "1024"
+        from app.agents.domain_agents import _calculate_impl
+        assert _calculate_impl("2 ** 10") == "1024"
 
     def test_division_by_zero(self):
-        from app.agents.domain_agents import calculate
-        result = calculate.fn(expression="1 / 0")  # type: ignore
-        assert "zero" in result.lower()
+        from app.agents.domain_agents import _calculate_impl
+        assert "zero" in _calculate_impl("1 / 0").lower()
 
     def test_rejects_function_calls(self):
-        from app.agents.domain_agents import calculate
-        result = calculate.fn(expression="__import__('os').system('ls')")  # type: ignore
-        assert "Error" in result
+        from app.agents.domain_agents import _calculate_impl
+        assert "Error" in _calculate_impl("__import__('os').system('ls')")
 
 
 # ── Group 5: run_python tool ──────────────────────────────────────────────────
@@ -150,23 +139,21 @@ class TestCalculateTool:
 class TestRunPythonTool:
 
     def test_simple_print(self):
-        from app.agents.domain_agents import run_python
-        result = run_python.fn(code="print('hello world')")  # type: ignore
-        assert "hello world" in result
+        from app.agents.domain_agents import _run_python_impl
+        assert "hello world" in _run_python_impl("print('hello world')")
 
     def test_math_output(self):
-        from app.agents.domain_agents import run_python
-        result = run_python.fn(code="print(sum(range(1, 11)))")  # type: ignore
-        assert "55" in result
+        from app.agents.domain_agents import _run_python_impl
+        assert "55" in _run_python_impl("print(sum(range(1, 11)))")
 
     def test_blocks_os_import(self):
-        from app.agents.domain_agents import run_python
-        result = run_python.fn(code="import os\nprint(os.getcwd())")  # type: ignore
+        from app.agents.domain_agents import _run_python_impl
+        result = _run_python_impl("import os\nprint(os.getcwd())")
         assert "Error" in result or "not allowed" in result
 
     def test_timeout_enforcement(self):
-        from app.agents.domain_agents import run_python
-        result = run_python.fn(code="while True: pass")  # type: ignore
+        from app.agents.domain_agents import _run_python_impl
+        result = _run_python_impl("while True: pass")
         assert "timeout" in result.lower()
 
 
@@ -175,13 +162,11 @@ class TestRunPythonTool:
 class TestFetchUrlTool:
 
     def test_rejects_non_http_url(self):
-        from app.agents.domain_agents import fetch_url
-        result = fetch_url.fn(url="ftp://example.com")  # type: ignore
-        assert "Error" in result
+        from app.agents.domain_agents import _fetch_url_impl
+        assert "Error" in _fetch_url_impl("ftp://example.com")
 
     def test_fetches_and_strips_html(self):
-        import httpx
-        from app.agents.domain_agents import fetch_url
+        from app.agents.domain_agents import _fetch_url_impl
 
         mock_response = MagicMock()
         mock_response.text = "<html><body><h1>Hello</h1><p>World</p></body></html>"
@@ -193,7 +178,7 @@ class TestFetchUrlTool:
         mock_client.get = MagicMock(return_value=mock_response)
 
         with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-            result = fetch_url.fn(url="https://example.com")  # type: ignore
+            result = _fetch_url_impl("https://example.com")
 
         assert "<html>" not in result
         assert "Hello" in result

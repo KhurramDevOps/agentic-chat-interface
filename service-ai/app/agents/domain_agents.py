@@ -15,6 +15,8 @@ Constitution compliance:
 
 from __future__ import annotations
 
+import httpx
+
 from agents import Agent, RunContextWrapper, function_tool
 
 from app.core.config import get_settings
@@ -71,6 +73,44 @@ def tavily_search(query: str) -> str:
         return f"Search encountered an error: {exc}"
 
 
+def _fetch_url_impl(url: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import re  # noqa: PLC0415
+
+    ensure_str(url, "fetch_url.url")
+    url = url.strip()
+
+    md_match = re.search(r'\(?(https?://[^\s\)\]>]+)', url)
+    if md_match:
+        url = md_match.group(1)
+    url = re.sub(r'[\[\]<>]', '', url).strip()
+
+    if not url.startswith(("http://", "https://")):
+        return "Error: URL must start with http:// or https://"
+
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
+            resp.raise_for_status()
+            html = resp.text
+
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        _MAX = 8000
+        truncated = text[:_MAX]
+        suffix = "... [truncated]" if len(text) > _MAX else ""
+
+        logger.info("fetch_url — url=%s, chars=%d", url, len(text))
+        return f"Content from {url}:\n\n{truncated}{suffix}"
+
+    except httpx.HTTPStatusError as exc:
+        return f"Error: HTTP {exc.response.status_code} fetching {url}"
+    except Exception as exc:
+        logger.warning("fetch_url failed — url=%s, error=%s", url, exc)
+        return f"Error fetching URL: {exc}"
+
+
 @function_tool
 def fetch_url(url: str) -> str:
     """
@@ -90,48 +130,42 @@ def fetch_url(url: str) -> str:
     Returns:
         Plain text content of the page (truncated to 8000 chars).
     """
-    import re  # noqa: PLC0415
-    import httpx  # noqa: PLC0415
+    return _fetch_url_impl(url)
 
-    ensure_str(url, "fetch_url.url")
-    url = url.strip()
 
-    # Strip any markdown link formatting the LLM may have injected:
-    # e.g. "[text](https://...)" → "https://..."
-    # or   "[https://...](https://...)" → "https://..."
-    md_match = re.search(r'\(?(https?://[^\s\)\]>]+)', url)
-    if md_match:
-        url = md_match.group(1)
+def _calculate_impl(expression: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import ast  # noqa: PLC0415
+    import operator as op  # noqa: PLC0415
 
-    # Remove any remaining stray brackets or angle brackets
-    url = re.sub(r'[\[\]<>]', '', url).strip()
+    ensure_str(expression, "calculate.expression")
 
-    if not url.startswith(("http://", "https://")):
-        return "Error: URL must start with http:// or https://"
+    _OPERATORS = {
+        ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+        ast.Div: op.truediv, ast.FloorDiv: op.floordiv,
+        ast.Mod: op.mod, ast.Pow: op.pow,
+        ast.USub: op.neg, ast.UAdd: op.pos,
+    }
+
+    def _eval(node: ast.AST) -> float:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](_eval(node.operand))
+        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
 
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
-            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
-            resp.raise_for_status()
-            html = resp.text
-
-        # Strip HTML tags
-        text = re.sub(r"<[^>]+>", " ", html)
-        # Collapse whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-
-        _MAX = 8000
-        truncated = text[:_MAX]
-        suffix = "... [truncated]" if len(text) > _MAX else ""
-
-        logger.info("fetch_url — url=%s, chars=%d", url, len(text))
-        return f"Content from {url}:\n\n{truncated}{suffix}"
-
-    except httpx.HTTPStatusError as exc:
-        return f"Error: HTTP {exc.response.status_code} fetching {url}"
+        tree = ast.parse(expression.strip(), mode="eval")
+        result = _eval(tree.body)
+        if result == int(result):
+            return str(int(result))
+        return str(round(result, 10))
+    except ZeroDivisionError:
+        return "Error: division by zero"
     except Exception as exc:
-        logger.warning("fetch_url failed — url=%s, error=%s", url, exc)
-        return f"Error fetching URL: {exc}"
+        return f"Error evaluating expression: {exc}"
 
 
 @function_tool
@@ -148,43 +182,52 @@ def calculate(expression: str) -> str:
     Returns:
         The numeric result as a string, or an error message.
     """
-    import ast  # noqa: PLC0415
-    import operator as op  # noqa: PLC0415
+    return _calculate_impl(expression)
 
-    ensure_str(expression, "calculate.expression")
 
-    _OPERATORS = {
-        ast.Add: op.add,
-        ast.Sub: op.sub,
-        ast.Mult: op.mul,
-        ast.Div: op.truediv,
-        ast.FloorDiv: op.floordiv,
-        ast.Mod: op.mod,
-        ast.Pow: op.pow,
-        ast.USub: op.neg,
-        ast.UAdd: op.pos,
-    }
+def _run_python_impl(code: str) -> str:
+    """Raw implementation — testable without the @function_tool wrapper."""
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
 
-    def _eval(node: ast.AST) -> float:
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return float(node.value)
-        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
-            return _OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
-            return _OPERATORS[type(node.op)](_eval(node.operand))
-        raise ValueError(f"Unsupported expression node: {type(node).__name__}")
+    ensure_str(code, "run_python.code")
+
+    _BLOCKED = ["import os", "import sys", "import subprocess", "import socket",
+                "import requests", "import httpx", "__import__", "open(", "exec(",
+                "eval(", "compile("]
+    code_lower = code.lower()
+    for pattern in _BLOCKED:
+        if pattern in code_lower:
+            return f"Error: '{pattern}' is not allowed in sandboxed execution."
+
+    dedented = textwrap.dedent(code)
 
     try:
-        tree = ast.parse(expression.strip(), mode="eval")
-        result = _eval(tree.body)
-        # Return int representation when result is a whole number
-        if result == int(result):
-            return str(int(result))
-        return str(round(result, 10))
-    except ZeroDivisionError:
-        return "Error: division by zero"
+        result = subprocess.run(
+            [sys.executable, "-c", dedented],
+            capture_output=True, text=True, timeout=3,
+        )
+        output = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        if result.returncode != 0:
+            return f"Script error (exit {result.returncode}):\n{stderr or output}"
+        if not output and stderr:
+            return f"Script produced no output. Stderr:\n{stderr}"
+
+        _MAX_OUTPUT = 4000
+        if len(output) > _MAX_OUTPUT:
+            output = output[:_MAX_OUTPUT] + "\n... [output truncated]"
+
+        logger.info("run_python — returncode=%d, output_len=%d", result.returncode, len(output))
+        return output or "(script ran successfully with no output)"
+
+    except subprocess.TimeoutExpired:
+        return "Error: script exceeded the 3-second timeout."
     except Exception as exc:
-        return f"Error evaluating expression: {exc}"
+        logger.warning("run_python failed — %s", exc)
+        return f"Error running script: {exc}"
 
 
 @function_tool
@@ -206,52 +249,7 @@ def run_python(code: str) -> str:
     Returns:
         The stdout output of the script, or an error/timeout message.
     """
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-    import textwrap  # noqa: PLC0415
-
-    ensure_str(code, "run_python.code")
-
-    # Reject obviously dangerous patterns before even spawning a process
-    _BLOCKED = ["import os", "import sys", "import subprocess", "import socket",
-                "import requests", "import httpx", "__import__", "open(", "exec(",
-                "eval(", "compile("]
-    code_lower = code.lower()
-    for pattern in _BLOCKED:
-        if pattern in code_lower:
-            return f"Error: '{pattern}' is not allowed in sandboxed execution."
-
-    dedented = textwrap.dedent(code)
-
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", dedented],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            # No extra env — inherits minimal env from the parent process
-        )
-        output = result.stdout.strip()
-        stderr = result.stderr.strip()
-
-        if result.returncode != 0:
-            return f"Script error (exit {result.returncode}):\n{stderr or output}"
-
-        if not output and stderr:
-            return f"Script produced no output. Stderr:\n{stderr}"
-
-        _MAX_OUTPUT = 4000
-        if len(output) > _MAX_OUTPUT:
-            output = output[:_MAX_OUTPUT] + "\n... [output truncated]"
-
-        logger.info("run_python — returncode=%d, output_len=%d", result.returncode, len(output))
-        return output or "(script ran successfully with no output)"
-
-    except subprocess.TimeoutExpired:
-        return "Error: script exceeded the 3-second timeout."
-    except Exception as exc:
-        logger.warning("run_python failed — %s", exc)
-        return f"Error running script: {exc}"
+    return _run_python_impl(code)
 
 
 # ── Document analysis tool (Phase 6) ─────────────────────────────────────────

@@ -17,6 +17,7 @@ import base64
 import io
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from groq import AsyncGroq  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from app.api.deps import verify_api_key
@@ -94,8 +95,6 @@ async def analyse_image(
     )
 
     try:
-        from groq import AsyncGroq  # type: ignore[import-untyped]
-
         client = AsyncGroq(api_key=settings.groq_api_key)
         response = await client.chat.completions.create(
             model=_VISION_MODEL,

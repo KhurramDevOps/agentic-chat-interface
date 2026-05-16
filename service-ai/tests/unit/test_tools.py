@@ -17,17 +17,18 @@ import pytest
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _calc(expr: str) -> str:
-    from app.agents.domain_agents import calculate
-    return calculate.fn(expression=expr)  # type: ignore[attr-defined]
+    from app.agents.domain_agents import _calculate_impl
+    return _calculate_impl(expr)
 
 
 def _run(code: str) -> str:
-    from app.agents.domain_agents import run_python
-    return run_python.fn(code=code)  # type: ignore[attr-defined]
+    from app.agents.domain_agents import _run_python_impl
+    return _run_python_impl(code)
 
 
 def _fetch(url: str, html: str = "<p>Hello</p>") -> str:
-    from app.agents.domain_agents import fetch_url
+    from app.agents.domain_agents import _fetch_url_impl
+    import httpx
 
     mock_resp = MagicMock()
     mock_resp.text = html
@@ -39,7 +40,7 @@ def _fetch(url: str, html: str = "<p>Hello</p>") -> str:
     mock_client.get = MagicMock(return_value=mock_resp)
 
     with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-        return fetch_url.fn(url=url)  # type: ignore[attr-defined]
+        return _fetch_url_impl(url)
 
 
 # ── calculate ─────────────────────────────────────────────────────────────────
@@ -173,13 +174,13 @@ class TestFetchUrl:
         assert "Body text" in result
 
     def test_rejects_ftp_url(self):
-        from app.agents.domain_agents import fetch_url
-        result = fetch_url.fn(url="ftp://example.com")  # type: ignore[attr-defined]
+        from app.agents.domain_agents import _fetch_url_impl
+        result = _fetch_url_impl("ftp://example.com")
         assert "Error" in result
 
     def test_rejects_empty_url(self):
-        from app.agents.domain_agents import fetch_url
-        result = fetch_url.fn(url="   ")  # type: ignore[attr-defined]
+        from app.agents.domain_agents import _fetch_url_impl
+        result = _fetch_url_impl("   ")
         assert "Error" in result
 
     def test_cleans_markdown_link_format(self):
@@ -204,7 +205,7 @@ class TestFetchUrl:
 
     def test_http_error_returns_message(self):
         import httpx
-        from app.agents.domain_agents import fetch_url
+        from app.agents.domain_agents import _fetch_url_impl
 
         mock_resp = MagicMock()
         mock_resp.status_code = 404
@@ -216,6 +217,6 @@ class TestFetchUrl:
         mock_client.get = MagicMock(side_effect=http_err)
 
         with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-            result = fetch_url.fn(url="https://example.com/missing")  # type: ignore[attr-defined]
+            result = _fetch_url_impl("https://example.com/missing")
 
         assert "404" in result

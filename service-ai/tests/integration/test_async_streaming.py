@@ -176,9 +176,21 @@ class TestBackgroundWorkerLifecycle:
             input_payload={"prompt": "a cat"},
         )
 
+        # Mock httpx so the poll immediately returns a 200 image response
+        import httpx
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "image/jpeg"}
+
+        mock_http_client = MagicMock()
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
         with patch("app.workers.media_worker.get_connection_manager", return_value=manager):
-            with patch("app.workers.media_worker._MOCK_GENERATION_DELAY", 0):
-                await _run_media_job(task)
+            with patch("app.workers.media_worker.httpx.AsyncClient", return_value=mock_http_client):
+                with patch("app.workers.media_worker.asyncio.sleep", new=AsyncMock()):
+                    await _run_media_job(task)
 
         assert ws.send_text.call_count == 2
 
@@ -238,10 +250,20 @@ class TestBackgroundWorkerLifecycle:
             input_payload={"prompt": "ghost"},
         )
 
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "image/jpeg"}
+
+        mock_http_client = MagicMock()
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+        mock_http_client.get = AsyncMock(return_value=mock_response)
+
         with patch("app.workers.media_worker.get_connection_manager", return_value=manager):
-            with patch("app.workers.media_worker._MOCK_GENERATION_DELAY", 0):
-                # Must not raise
-                await _run_media_job(task)
+            with patch("app.workers.media_worker.httpx.AsyncClient", return_value=mock_http_client):
+                with patch("app.workers.media_worker.asyncio.sleep", new=AsyncMock()):
+                    # Must not raise
+                    await _run_media_job(task)
 
 
 # ── Group 3: WebSocket endpoint ───────────────────────────────────────────────
