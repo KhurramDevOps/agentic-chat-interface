@@ -1,9 +1,8 @@
+import React from 'react';
+import AuthPortal from './pages/AuthPortal';
+
 function App() {
-  return (
-    <div className="App">
-      <h1>Hello World</h1>
-    </div>
-  );
+  return <AuthPortal />;
 }
 
 export default App;
