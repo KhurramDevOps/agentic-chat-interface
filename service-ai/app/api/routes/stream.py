@@ -32,13 +32,14 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from app.agents.swarm import run_swarm, stream_swarm
+from app.agents.swarm import run_swarm, stream_swarm, get_last_stream_usage
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.streaming import ChatStreamEvent
 from app.services.history_service import append_to_history, get_history
 from app.services.streaming_service import get_connection_manager
+from app.services.user_service import record_token_usage
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -177,9 +178,18 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
             if full_response:
                 await append_to_history(session_id, "assistant", full_response)
 
+            # ── Exact token metering ──────────────────────────────────────
+            usage = get_last_stream_usage()
+            if usage["total_tokens"] > 0:
+                await record_token_usage(
+                    session_id=session_id,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                )
+
             logger.info(
-                "WebSocket turn complete — client_id=%s, response_len=%d",
-                client_id, len(full_response),
+                "WebSocket turn complete — client_id=%s, response_len=%d, tokens=%d",
+                client_id, len(full_response), usage["total_tokens"],
             )
 
     except WebSocketDisconnect:
