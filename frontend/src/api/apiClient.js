@@ -12,7 +12,7 @@ import axios from 'axios';
  */
 
 const apiClient = axios.create({
-  baseURL: process.env.REACT_APP_GATEWAY_URL || 'http://localhost:3001',
+  baseURL: process.env.REACT_APP_GATEWAY_URL || 'http://localhost:5001',
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
 });

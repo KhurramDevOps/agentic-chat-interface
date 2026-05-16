@@ -29,7 +29,12 @@ const useAuthStore = create((set, get) => ({
       await get().fetchMe();
       return true;
     } catch (err) {
-      set({ error: err?.response?.data?.message || 'Login failed.', isLoading: false });
+      const message =
+        err?.response?.data?.message ||
+        (err?.code === 'ERR_NETWORK' ? 'Cannot reach the server. Is the gateway running on port 5001?' : null) ||
+        err?.message ||
+        'Login failed.';
+      set({ error: message, isLoading: false });
       return false;
     }
   },
@@ -42,7 +47,12 @@ const useAuthStore = create((set, get) => ({
       await axios.post(`${GATEWAY}/api/auth/signup`, { name, email, password });
       return await get().login(email, password);
     } catch (err) {
-      set({ error: err?.response?.data?.message || 'Registration failed.', isLoading: false });
+      const message =
+        err?.response?.data?.message ||
+        (err?.code === 'ERR_NETWORK' ? 'Cannot reach the server. Is the gateway running on port 5001?' : null) ||
+        err?.message ||
+        'Registration failed.';
+      set({ error: message, isLoading: false });
       return false;
     }
   },
