@@ -34,6 +34,7 @@ from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.streaming import ChatStreamEvent
 from app.services.history_service import append_to_history, get_history, message_count
 from app.services.streaming_service import get_connection_manager
+from app.services.user_service import record_token_usage
 
 logger = get_logger(__name__)
 router = APIRouter()
