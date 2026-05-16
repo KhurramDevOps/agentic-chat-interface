@@ -124,11 +124,12 @@ def get_swarm() -> Agent:
     wait=wait_exponential(multiplier=2, min=2, max=8),
     reraise=True,
 )
-async def _run_with_retry(agent: Agent, input_messages: list) -> RunResult:
+async def _run_with_retry(agent: Agent, input_messages: list, context_variables: dict | None = None) -> RunResult:
     """Execute Runner.run with exponential backoff on 429/500/503."""
     return await Runner.run(
         starting_agent=agent,
         input=input_messages,
+        context=context_variables,
         max_turns=10,
     )
 
@@ -155,12 +156,9 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
     context_id = request.memory_context_id or request.request_id
 
-    # Build the input as a list of OpenAI-style message dicts.
-    # Prepend a system message with the session_id so memory tools
-    # always have access to it without polluting the user message.
     system_msg = {
         "role": "system",
-        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+        "content": f"session_id: {context_id}",
     }
 
     history_msgs = [
@@ -183,8 +181,15 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         len(request.messages),
     )
 
-    result: RunResult = await _run_with_retry(triage, input_messages)
+    # context_variables are injected into tool functions via context_variables: dict param
+    # — hidden from the LLM schema, available to tools at runtime.
+    context_variables = {
+        "session_id": context_id,
+        "client_id": request.request_id,  # WebSocket client_id == request_id in stream.py
+        "request_id": request.request_id,
+    }
 
+    result: RunResult = await _run_with_retry(triage, input_messages, context_variables)
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
@@ -238,7 +243,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
 
     system_msg = {
         "role": "system",
-        "content": f"session_id: {context_id}. Use this as context_id in all memory tool calls.",
+        "content": f"session_id: {context_id}",
     }
     history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
     input_messages = [system_msg] + history_msgs
@@ -247,6 +252,14 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         "stream_swarm — request_id=%s, context_id=%s, history_turns=%d",
         request.request_id, context_id, len(request.messages),
     )
+
+    # context_variables are injected into tool functions via context_variables: dict param
+    # — hidden from the LLM schema, available to tools at runtime.
+    context_variables = {
+        "session_id": context_id,
+        "client_id": request.request_id,
+        "request_id": request.request_id,
+    }
 
     # Apply Groq-compatible model settings via run_config
     from app.core.config import get_settings as _get_settings  # noqa: PLC0415
@@ -259,6 +272,7 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     result = Runner.run_streamed(
         starting_agent=triage,
         input=input_messages,
+        context=context_variables,
         max_turns=10,
         run_config=run_config,
     )

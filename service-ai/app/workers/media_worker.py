@@ -37,6 +37,18 @@ logger = get_logger(__name__)
 # Simulated generation time (seconds) — replace with real API call in production
 _MOCK_GENERATION_DELAY = 3
 
+# Reference to the main FastAPI event loop — set once at app startup via
+# set_main_event_loop(). Allows sync function_tools running in thread
+# executors to safely schedule coroutines back onto the main loop.
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Store the main event loop. Call this once from the FastAPI lifespan."""
+    global _main_loop
+    _main_loop = loop
+    logger.info("media_worker: main event loop registered.")
+
 
 def dispatch_media_job(
     client_id: str,
@@ -47,9 +59,14 @@ def dispatch_media_job(
     """
     Schedule a background media generation job and return the task_id immediately.
 
-    Uses call_soon_threadsafe so this works correctly whether called from an
-    async context or from a sync function_tool running in a thread executor
-    (which is how the openai-agents SDK invokes sync tools).
+    Safe to call from both async contexts and sync function_tools running in
+    thread executors (how the openai-agents SDK invokes sync tools).
+
+    Strategy:
+      - If called from an async context (running loop in current thread),
+        use call_soon_threadsafe to create a Task on that loop.
+      - If called from a thread executor (no running loop), use
+        run_coroutine_threadsafe against the stored main loop.
 
     Args:
         client_id:     WebSocket client to push the completion event to.
@@ -67,9 +84,8 @@ def dispatch_media_job(
         input_payload=input_payload,
     )
 
-    # call_soon_threadsafe schedules the task creation on the event loop
-    # from any thread — safe for sync tools called via thread executor.
     try:
+        # Called from an async context — schedule directly on the running loop.
         loop = asyncio.get_running_loop()
         loop.call_soon_threadsafe(
             lambda: loop.create_task(
@@ -78,7 +94,14 @@ def dispatch_media_job(
             )
         )
     except RuntimeError:
-        logger.warning("dispatch_media_job: no running event loop — job will not execute.")
+        # Called from a thread executor — use the stored main loop reference.
+        if _main_loop is not None and _main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_run_media_job(task), _main_loop)
+        else:
+            logger.warning(
+                "dispatch_media_job: no event loop available — "
+                "task_id=%s will not execute.", task.task_id
+            )
 
     logger.info(
         "Media job dispatched — task_id=%s, job_type=%s, client_id=%s",

@@ -15,7 +15,7 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from agents import Agent, function_tool
+from agents import Agent, RunContextWrapper, function_tool
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -124,7 +124,6 @@ def _add_memory_impl(context_id: str, content: str) -> str:
     """Raw implementation — testable without the @function_tool wrapper."""
     ensure_str(context_id, "add_memory.context_id")
     ensure_str(content, "add_memory.content")
-
     if not content.strip():
         return "Error: content cannot be empty."
 
@@ -161,17 +160,18 @@ def _add_memory_impl(context_id: str, content: str) -> str:
 
 
 @function_tool
-def add_memory(context_id: str, content: str) -> str:
+def add_memory(ctx: RunContextWrapper[dict], content: str) -> str:
     """
     Store a piece of information in the user's long-term memory.
 
     Args:
-        context_id: The conversation or user context bucket identifier.
-        content:    The information to remember.
+        content: The information to remember.
 
     Returns:
-        Confirmation message with the stored content summary.
+        Confirmation message.
     """
+    context_variables = ctx.context or {}
+    context_id = context_variables.get("session_id") or context_variables.get("context_id", "default")
     return _add_memory_impl(context_id=context_id, content=content)
 
 
@@ -232,17 +232,18 @@ def _search_memory_impl(context_id: str, query: str) -> str:
 
 
 @function_tool
-def search_memory(context_id: str, query: str) -> str:
+def search_memory(ctx: RunContextWrapper[dict], query: str) -> str:
     """
     Retrieve relevant memories for a given context and query.
 
     Args:
-        context_id: The conversation or user context bucket identifier.
-        query:      Natural-language query to search stored memories.
+        query: Natural-language query to search stored memories.
 
     Returns:
         Relevant memory entries as a formatted string.
     """
+    context_variables = ctx.context or {}
+    context_id = context_variables.get("session_id") or context_variables.get("context_id", "default")
     return _search_memory_impl(context_id=context_id, query=query)
 
 
@@ -306,12 +307,10 @@ def build_memory_agent(model: str, model_settings=None) -> Agent:
             "past conversation context, and long-term memory."
         ),
         instructions=(
-            "You are a memory specialist. The user's session_id is always provided "
-            "at the start of their message in the format [session_id: <id>]. "
-            "You MUST extract this session_id and use it as the context_id in ALL tool calls.\n\n"
+            "You are a memory specialist. The session context is automatically injected "
+            "— you do NOT need to pass any session_id or context_id to the tools.\n\n"
             "Rules you MUST follow:\n"
-            "1. When storing information: call add_memory with the session_id as context_id "
-            "and the information as content.\n"
+            "1. When storing information: call add_memory with only the content to remember.\n"
             "2. When the user asks about past projects, preferences, or 'what you know about me': "
             "you MUST call search_memory FIRST before providing any response. "
             "Never answer from memory without calling the tool.\n"
@@ -330,26 +329,21 @@ def build_memory_agent(model: str, model_settings=None) -> Agent:
 
 @function_tool
 def generate_media(
+    ctx: RunContextWrapper[dict],
     prompt: str,
-    client_id: str = "",
-    request_id: str = "",
     job_type: str = "image",
 ) -> str:
     """
     Dispatch a non-blocking image generation job via Pollinations.ai.
 
-    Returns immediately with a task_id and the direct image URL.
-    If a WebSocket client_id is provided, a background_update event will
-    be pushed to that client when the job completes.
+    Returns immediately with the direct image URL.
 
     Args:
-        prompt:     Description of the image to generate.
-        client_id:  WebSocket client_id to push the completion event to (optional).
-        request_id: Originating chat request ID for correlation (optional).
-        job_type:   "image" | "video" | "audio" (default: "image")
+        prompt:   Description of the image to generate.
+        job_type: "image" | "video" | "audio" (default: "image")
 
     Returns:
-        Acknowledgment string with the task_id and direct image URL.
+        Acknowledgment string with the direct image URL.
     """
     import urllib.parse  # noqa: PLC0415
 
@@ -358,40 +352,34 @@ def generate_media(
 
     ensure_str(prompt, "generate_media.prompt")
 
-    # Validate job_type
+    context_variables = ctx.context or {}
+    client_id = context_variables.get("client_id", "no-ws-client")
+    request_id = context_variables.get("request_id", "no-request-id")
+
     try:
         jt = JobType(job_type.lower())
     except ValueError:
         jt = JobType.IMAGE
 
-    # Build the Pollinations URL immediately — no waiting needed
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
         f"?width=1024&height=1024&nologo=true"
     )
 
-    # Dispatch background job only if a WebSocket client is connected
-    effective_client_id = client_id or "no-ws-client"
-    effective_request_id = request_id or "no-request-id"
-
     task_id = dispatch_media_job(
-        client_id=effective_client_id,
-        request_id=effective_request_id,
+        client_id=client_id,
+        request_id=request_id,
         job_type=jt,
         input_payload={"prompt": prompt, "job_type": jt.value, "url": image_url},
     )
 
-    logger.info(
-        "generate_media dispatched — task_id=%s, client_id=%s, job_type=%s",
-        task_id, effective_client_id, jt.value,
-    )
+    logger.info("generate_media dispatched — task_id=%s, job_type=%s", task_id, jt.value)
     return (
         f"Your image is being generated! Here is the direct link:\n\n"
         f"{image_url}\n\n"
         f"Task ID: {task_id}. The image will render once Pollinations processes it "
-        f"(usually within a few seconds). "
-        f"{'A WebSocket notification will be sent when ready.' if client_id else ''}"
+        f"(usually within a few seconds)."
     )
 
 
