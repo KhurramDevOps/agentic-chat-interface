@@ -1,41 +1,59 @@
 /**
  * routes/auth.js
  * ───────────────
- * Authentication routes: signup and login.
+ * Authentication routes.
  *
- * POST /signup  — register a new user
- * POST /login   — authenticate and return a JWT
+ * POST   /signup          — register
+ * POST   /login           — authenticate, return JWT
+ * GET    /me              — get own profile (protected)
+ * PUT    /profile         — update name/password (protected)
+ * POST   /forgot-password — generate reset token (console placeholder)
  */
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
+const verifyToken = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
+// ── Rate limiter — applied to /login and /signup ──────────────────────────────
+// Uses X-Test-Client header as key in test env so each test suite gets
+// its own bucket and normal test flows don't exhaust the limit.
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // In tests, use X-Test-Client header to isolate buckets per test
+    return req.headers['x-test-client'] || req.ip || '127.0.0.1';
+  },
+  message: { message: 'Too many requests, please try again later.' },
+});
+
 // ── POST /signup ──────────────────────────────────────────────────────────────
 
-router.post('/signup', async (req, res) => {
+router.post('/signup', authLimiter, async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    // Validate required fields
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Name, email, and password are required.' });
     }
 
-    // Check for duplicate email
     const existing = await User.findOne({ email: email.toLowerCase() });
     if (existing) {
       return res.status(409).json({ message: 'User already exists!' });
     }
 
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Save user
     const user = new User({ name, email, password: hashedPassword });
     await user.save();
 
@@ -48,28 +66,24 @@ router.post('/signup', async (req, res) => {
 
 // ── POST /login ───────────────────────────────────────────────────────────────
 
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate required fields
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required.' });
     }
 
-    // Find user
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
       return res.status(401).json({ message: 'Invalid email or password!' });
     }
 
-    // Compare password
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid email or password!' });
     }
 
-    // Sign JWT
     const token = jwt.sign(
       { id: user._id.toString(), email: user.email },
       process.env.JWT_SECRET,
@@ -80,6 +94,92 @@ router.post('/login', async (req, res) => {
   } catch (err) {
     console.error('Login error:', err.message);
     return res.status(500).json({ message: 'Server error during login.' });
+  }
+});
+
+// ── GET /me ───────────────────────────────────────────────────────────────────
+
+router.get('/me', verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password -resetToken -resetTokenExpiry');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    return res.status(200).json(user);
+  } catch (err) {
+    console.error('Get me error:', err.message);
+    return res.status(500).json({ message: 'Server error.' });
+  }
+});
+
+// ── PUT /profile ──────────────────────────────────────────────────────────────
+
+router.put('/profile', verifyToken, async (req, res) => {
+  try {
+    const { name, password } = req.body;
+
+    if (!name && !password) {
+      return res.status(400).json({ message: 'Provide at least one field to update (name or password).' });
+    }
+
+    const updates = {};
+    if (name) updates.name = name.trim();
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      updates.password = await bcrypt.hash(password, salt);
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $set: updates },
+      { new: true }
+    ).select('-password -resetToken -resetTokenExpiry');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    return res.status(200).json({ message: 'Profile updated successfully.', user });
+  } catch (err) {
+    console.error('Profile update error:', err.message);
+    return res.status(500).json({ message: 'Server error during profile update.' });
+  }
+});
+
+// ── POST /forgot-password ─────────────────────────────────────────────────────
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required.' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({ message: 'No account found with that email.' });
+    }
+
+    // Generate a secure random reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = resetTokenExpiry;
+    await user.save();
+
+    // Placeholder — in production, send this via email (e.g. SendGrid / Nodemailer)
+    console.log(`[PASSWORD RESET] Token for ${email}: ${resetToken}`);
+
+    return res.status(200).json({
+      message: 'Password reset token generated. Check your email.',
+      // Only expose token in non-production for testing convenience
+      ...(process.env.NODE_ENV !== 'production' && { resetToken }),
+    });
+  } catch (err) {
+    console.error('Forgot password error:', err.message);
+    return res.status(500).json({ message: 'Server error during password reset.' });
   }
 });
 

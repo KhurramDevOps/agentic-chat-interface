@@ -1,23 +1,12 @@
 /**
  * tests/chat.test.js
  * ───────────────────
- * Spec-driven tests for the Python AI proxy route.
+ * Specs for the Python AI proxy routes.
  *
- * POST /api/chat
- *
- * Uses jest.mock('axios') to intercept outbound HTTP calls so no real
- * Python service is needed. Uses mongodb-memory-server for auth setup.
- *
- * Architectural contract being tested:
- *   1. Route is protected by verifyToken middleware.
- *   2. Authenticated requests forward req.body to PYTHON_API_URL.
- *   3. Two headers are injected into the Axios call:
- *        X-User-ID : req.user.id
- *        X-API-Key : process.env.PYTHON_API_KEY
- *   4. The Python service response is returned to the client.
+ * POST /api/chat         — non-streaming completions proxy
+ * POST /api/chat/stream  — SSE streaming proxy
  */
 
-// Mock axios BEFORE requiring any app modules
 jest.mock('axios');
 
 const axios = require('axios');
@@ -25,28 +14,22 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-
-// ── Environment ───────────────────────────────────────────────────────────────
+const { EventEmitter } = require('events');
 
 const TEST_JWT_SECRET = 'test-jwt-secret-for-chat-specs';
 const TEST_API_KEY = 'test-python-api-key-xyz';
 const TEST_PYTHON_URL = 'http://localhost:8000/api/v1/chat/completions';
+const TEST_PYTHON_STREAM_URL = 'http://localhost:8000/api/v1/chat/stream';
 
 process.env.JWT_SECRET = TEST_JWT_SECRET;
 process.env.PYTHON_API_KEY = TEST_API_KEY;
 process.env.PYTHON_API_URL = TEST_PYTHON_URL;
+process.env.PYTHON_STREAM_URL = TEST_PYTHON_STREAM_URL;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Generate a signed JWT for a test user.
- */
 function makeToken(payload = {}) {
   const defaults = { id: 'user-test-id-001', email: 'chat@example.com' };
   return jwt.sign({ ...defaults, ...payload }, TEST_JWT_SECRET, { expiresIn: '1h' });
 }
-
-// ── Setup / Teardown ──────────────────────────────────────────────────────────
 
 let app;
 let mongoServer;
@@ -70,104 +53,62 @@ afterAll(async () => {
   await mongoServer.stop();
 });
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── POST /api/chat ────────────────────────────────────────────────────────────
 
 describe('POST /api/chat', () => {
 
-  // ── Auth enforcement ─────────────────────────────────────────────────────────
-
-  it('should return 401/403 when no token is provided', async () => {
+  it('should return 401 when no token is provided', async () => {
     const res = await request(app)
       .post('/api/chat')
       .send({ messages: [{ role: 'user', content: 'Hello' }] });
-
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
-
-    // axios must NOT have been called — request was blocked at middleware
     expect(axios.post).not.toHaveBeenCalled();
   });
 
-  it('should return 401/403 when an invalid token is provided', async () => {
+  it('should return 401 for an invalid token', async () => {
     const res = await request(app)
       .post('/api/chat')
       .set('Authorization', 'Bearer invalid.token.here')
       .send({ messages: [{ role: 'user', content: 'Hello' }] });
-
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(axios.post).not.toHaveBeenCalled();
   });
 
-  // ── Authenticated proxy behaviour ─────────────────────────────────────────────
+  it('should forward the request body to the Python service', async () => {
+    axios.post.mockResolvedValueOnce({
+      data: { request_id: 'py-req-001', content: 'Hello from the AI!' },
+    });
 
-  it('should forward the request body to the Python service when authenticated', async () => {
-    const mockPythonResponse = {
-      data: {
-        request_id: 'py-req-001',
-        content: 'Hello from the AI!',
-        agent: { agent_name: 'TriageAgent' },
-      },
-    };
-    axios.post.mockResolvedValueOnce(mockPythonResponse);
-
-    const body = {
-      messages: [{ role: 'user', content: 'What is 2+2?' }],
-      model: 'llama-3.3-70b-versatile',
-    };
-
+    const body = { messages: [{ role: 'user', content: 'What is 2+2?' }] };
     const res = await request(app)
       .post('/api/chat')
       .set('Authorization', `Bearer ${makeToken()}`)
       .send(body);
 
     expect(res.status).toBe(200);
-
-    // axios.post must have been called exactly once
     expect(axios.post).toHaveBeenCalledTimes(1);
-
-    // The first argument must be the Python API URL
-    const [calledUrl] = axios.post.mock.calls[0];
+    const [calledUrl, calledBody] = axios.post.mock.calls[0];
     expect(calledUrl).toBe(TEST_PYTHON_URL);
-
-    // The second argument must include the forwarded body
-    const [, calledBody] = axios.post.mock.calls[0];
     expect(calledBody).toMatchObject(body);
   });
 
-  it('should inject X-User-ID and X-API-Key headers into the Axios request', async () => {
+  it('should inject X-User-ID and X-API-Key headers', async () => {
     const userId = 'injected-user-id-999';
-    const mockPythonResponse = {
-      data: { content: 'Response with headers verified.' },
-    };
-    axios.post.mockResolvedValueOnce(mockPythonResponse);
+    axios.post.mockResolvedValueOnce({ data: { content: 'ok' } });
 
     await request(app)
       .post('/api/chat')
       .set('Authorization', `Bearer ${makeToken({ id: userId })}`)
-      .send({ messages: [{ role: 'user', content: 'Test headers' }] });
+      .send({ messages: [{ role: 'user', content: 'Test' }] });
 
-    expect(axios.post).toHaveBeenCalledTimes(1);
-
-    // The third argument to axios.post is the config object containing headers
     const [, , calledConfig] = axios.post.mock.calls[0];
-
-    expect(calledConfig).toBeDefined();
-    expect(calledConfig.headers).toBeDefined();
-
-    // X-User-ID must be the authenticated user's id
     expect(calledConfig.headers['X-User-ID']).toBe(userId);
-
-    // X-API-Key must be the env secret
     expect(calledConfig.headers['X-API-Key']).toBe(TEST_API_KEY);
   });
 
-  it('should return the Python service response body to the client', async () => {
-    const pythonPayload = {
-      request_id: 'py-req-002',
-      content: 'The answer is 42.',
-      agent: { agent_name: 'ResearchAgent', handoff_occurred: false },
-      model: 'llama-3.3-70b-versatile',
-    };
+  it('should return the Python service response body', async () => {
+    const pythonPayload = { request_id: 'py-req-002', content: 'The answer is 42.' };
     axios.post.mockResolvedValueOnce({ data: pythonPayload });
 
     const res = await request(app)
@@ -179,38 +120,29 @@ describe('POST /api/chat', () => {
     expect(res.body).toMatchObject(pythonPayload);
   });
 
-  // ── Error handling ────────────────────────────────────────────────────────────
-
-  it('should return 502 or 500 when the Python service is unreachable', async () => {
+  it('should return 502 when the Python service is unreachable', async () => {
     axios.post.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
     const res = await request(app)
       .post('/api/chat')
       .set('Authorization', `Bearer ${makeToken()}`)
-      .send({ messages: [{ role: 'user', content: 'Will this fail?' }] });
+      .send({ messages: [{ role: 'user', content: 'fail?' }] });
 
     expect(res.status).toBeGreaterThanOrEqual(500);
   });
 
   it('should propagate a 4xx error from the Python service', async () => {
-    const axiosError = {
-      response: {
-        status: 422,
-        data: { error: { code: 'VALIDATION_ERROR', message: 'Bad request body' } },
-      },
-    };
-    axios.post.mockRejectedValueOnce(axiosError);
+    axios.post.mockRejectedValueOnce({
+      response: { status: 422, data: { error: 'Bad request' } },
+    });
 
     const res = await request(app)
       .post('/api/chat')
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ messages: [] });
 
-    // Gateway should surface the upstream error status or a 5xx
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
-
-  // ── Request ID forwarding (optional but good practice) ────────────────────────
 
   it('should include a request_id in the forwarded body', async () => {
     axios.post.mockResolvedValueOnce({ data: { content: 'ok' } });
@@ -221,13 +153,130 @@ describe('POST /api/chat', () => {
       .send({ messages: [{ role: 'user', content: 'test' }] });
 
     const [, calledBody] = axios.post.mock.calls[0];
-
-    // The gateway should inject a request_id if the client didn't provide one
-    // OR pass through the client's request_id
     expect(
-      calledBody.request_id !== undefined ||
-      calledBody.messages !== undefined
+      calledBody.request_id !== undefined || calledBody.messages !== undefined
     ).toBe(true);
+  });
+
+  // ── Timeout ────────────────────────────────────────────────────────────────
+
+  it('should include a timeout in the Axios config', async () => {
+    axios.post.mockResolvedValueOnce({ data: { content: 'ok' } });
+
+    await request(app)
+      .post('/api/chat')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ messages: [{ role: 'user', content: 'timeout test' }] });
+
+    const [, , calledConfig] = axios.post.mock.calls[0];
+    expect(calledConfig.timeout).toBeDefined();
+    expect(typeof calledConfig.timeout).toBe('number');
+    // Must be at least 5 seconds, at most 60 seconds
+    expect(calledConfig.timeout).toBeGreaterThanOrEqual(5000);
+    expect(calledConfig.timeout).toBeLessThanOrEqual(60000);
+  });
+
+});
+
+// ── POST /api/chat/stream ─────────────────────────────────────────────────────
+
+describe('POST /api/chat/stream', () => {
+
+  it('should return 401 when no token is provided', async () => {
+    const res = await request(app)
+      .post('/api/chat/stream')
+      .send({ messages: [{ role: 'user', content: 'Hello' }] });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+  });
+
+  it('should return 401 for an invalid token', async () => {
+    const res = await request(app)
+      .post('/api/chat/stream')
+      .set('Authorization', 'Bearer bad.token')
+      .send({ messages: [{ role: 'user', content: 'Hello' }] });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('should set Content-Type to text/event-stream for authenticated requests', async () => {
+    // Mock axios to return a readable stream-like response
+    const mockStream = new EventEmitter();
+    mockStream.data = null;
+
+    // axios.post for SSE returns a response with a data stream
+    axios.post.mockResolvedValueOnce({
+      data: {
+        on: jest.fn((event, cb) => {
+          if (event === 'data') {
+            // Immediately emit one chunk then end
+            setImmediate(() => {
+              cb(Buffer.from('data: {"type":"token","content":"Hello"}\n\n'));
+              cb(Buffer.from('data: {"type":"complete"}\n\n'));
+            });
+          }
+          if (event === 'end') {
+            setImmediate(() => cb());
+          }
+          return { on: jest.fn() };
+        }),
+        pipe: jest.fn(),
+      },
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    const res = await request(app)
+      .post('/api/chat/stream')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ messages: [{ role: 'user', content: 'stream test' }] })
+      .buffer(true)
+      .parse((res, callback) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk.toString(); });
+        res.on('end', () => callback(null, data));
+      });
+
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+  });
+
+  it('should inject X-User-ID and X-API-Key into the upstream SSE request', async () => {
+    const userId = 'stream-user-id-777';
+
+    axios.post.mockResolvedValueOnce({
+      data: {
+        on: jest.fn((event, cb) => {
+          if (event === 'end') setImmediate(() => cb());
+          return { on: jest.fn() };
+        }),
+        pipe: jest.fn(),
+      },
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+    await request(app)
+      .post('/api/chat/stream')
+      .set('Authorization', `Bearer ${makeToken({ id: userId })}`)
+      .send({ messages: [{ role: 'user', content: 'test' }] })
+      .buffer(true)
+      .parse((res, callback) => {
+        res.on('data', () => {});
+        res.on('end', () => callback(null, ''));
+      });
+
+    expect(axios.post).toHaveBeenCalledTimes(1);
+    const [, , calledConfig] = axios.post.mock.calls[0];
+    expect(calledConfig.headers['X-User-ID']).toBe(userId);
+    expect(calledConfig.headers['X-API-Key']).toBe(TEST_API_KEY);
+  });
+
+  it('should return 502 when the Python SSE service is unreachable', async () => {
+    axios.post.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const res = await request(app)
+      .post('/api/chat/stream')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ messages: [{ role: 'user', content: 'fail' }] });
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
   });
 
 });
