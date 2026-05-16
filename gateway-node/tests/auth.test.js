@@ -309,6 +309,158 @@ describe('POST /api/auth/forgot-password', () => {
 
 });
 
+// ── POST /api/auth/refresh ────────────────────────────────────────────────────
+
+describe('POST /api/auth/refresh', () => {
+
+  it('should return a new 1-hour access token when given a valid refresh token', async () => {
+    // Login to get both tokens
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `refresh-setup-${Date.now()}`)
+      .send(validUser);
+    const loginRes = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `refresh-login-${Date.now()}`)
+      .send({ email: validUser.email, password: validUser.password });
+
+    expect(loginRes.body.refreshToken).toBeDefined();
+    const { refreshToken } = loginRes.body;
+
+    const res = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken });
+
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeDefined();
+    expect(typeof res.body.token).toBe('string');
+    expect(res.body.token.split('.')).toHaveLength(3);
+
+    // New access token must expire in 1h
+    const decoded = jwt.decode(res.body.token);
+    const expiresIn = decoded.exp - decoded.iat;
+    expect(expiresIn).toBe(3600);
+  });
+
+  it('should return 401 when no refresh token is provided', async () => {
+    const res = await request(app).post('/api/auth/refresh').send({});
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('should return 401 for an invalid/tampered refresh token', async () => {
+    const res = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken: 'tampered.refresh.token' });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('should return 401 for a refresh token not found in the database', async () => {
+    // Sign a valid-looking token but don't save it to any user
+    const fakeRefresh = jwt.sign(
+      { id: 'nonexistent-user' },
+      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    const res = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken: fakeRefresh });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('login response must include both token (1h) and refreshToken (7d)', async () => {
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `refresh-both-setup-${Date.now()}`)
+      .send(validUser);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `refresh-both-login-${Date.now()}`)
+      .send({ email: validUser.email, password: validUser.password });
+
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeDefined();
+    expect(res.body.refreshToken).toBeDefined();
+
+    const access = jwt.decode(res.body.token);
+    const refresh = jwt.decode(res.body.refreshToken);
+    expect(access.exp - access.iat).toBe(3600);          // 1 hour
+    expect(refresh.exp - refresh.iat).toBeGreaterThan(3600); // longer than 1h
+  });
+
+});
+
+// ── POST /api/auth/reset-password ─────────────────────────────────────────────
+
+describe('POST /api/auth/reset-password', () => {
+
+  async function setupResetToken() {
+    await request(app)
+      .post('/api/auth/signup')
+      .set('X-Test-Client', `reset-setup-${Date.now()}`)
+      .send(validUser);
+    const forgotRes = await request(app)
+      .post('/api/auth/forgot-password')
+      .send({ email: validUser.email });
+    return forgotRes.body.resetToken;
+  }
+
+  it('should update the password and clear the reset token', async () => {
+    const resetToken = await setupResetToken();
+    expect(resetToken).toBeDefined();
+
+    const res = await request(app)
+      .post('/api/auth/reset-password')
+      .send({ resetToken, newPassword: 'freshNewPass123' });
+
+    expect(res.status).toBe(200);
+    const bodyStr = JSON.stringify(res.body).toLowerCase();
+    expect(
+      bodyStr.includes('success') || bodyStr.includes('updated') || bodyStr.includes('reset')
+    ).toBe(true);
+  });
+
+  it('should allow login with the new password after reset', async () => {
+    const resetToken = await setupResetToken();
+    await request(app)
+      .post('/api/auth/reset-password')
+      .send({ resetToken, newPassword: 'afterResetPass456' });
+
+    const loginRes = await request(app)
+      .post('/api/auth/login')
+      .set('X-Test-Client', `reset-login-${Date.now()}`)
+      .send({ email: validUser.email, password: 'afterResetPass456' });
+
+    expect(loginRes.status).toBe(200);
+    expect(loginRes.body.token).toBeDefined();
+  });
+
+  it('should clear the resetToken field from the database after use', async () => {
+    const resetToken = await setupResetToken();
+    await request(app)
+      .post('/api/auth/reset-password')
+      .send({ resetToken, newPassword: 'clearTokenPass789' });
+
+    const User = require('../models/User');
+    const user = await User.findOne({ email: validUser.email });
+    expect(user.resetToken).toBeNull();
+  });
+
+  it('should return 400 for an invalid or expired reset token', async () => {
+    const res = await request(app)
+      .post('/api/auth/reset-password')
+      .send({ resetToken: 'invalid-token-xyz', newPassword: 'newPass123' });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('should return 400 when required fields are missing', async () => {
+    const res = await request(app)
+      .post('/api/auth/reset-password')
+      .send({ resetToken: 'some-token' }); // missing newPassword
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+});
+
 // ── Rate limiting on /login ───────────────────────────────────────────────────
 
 describe('Rate limiting', () => {

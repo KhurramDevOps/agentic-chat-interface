@@ -90,7 +90,16 @@ router.post('/login', authLimiter, async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    return res.status(200).json({ token });
+    // Generate a long-lived refresh token and persist it
+    const refreshToken = jwt.sign(
+      { id: user._id.toString() },
+      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    return res.status(200).json({ token, refreshToken });
   } catch (err) {
     console.error('Login error:', err.message);
     return res.status(500).json({ message: 'Server error during login.' });
@@ -179,6 +188,79 @@ router.post('/forgot-password', async (req, res) => {
     });
   } catch (err) {
     console.error('Forgot password error:', err.message);
+    return res.status(500).json({ message: 'Server error during password reset.' });
+  }
+});
+
+// ── POST /refresh ─────────────────────────────────────────────────────────────
+
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(401).json({ message: 'Refresh token is required.' });
+    }
+
+    // Verify the token signature
+    let decoded;
+    try {
+      decoded = jwt.verify(
+        refreshToken,
+        process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET
+      );
+    } catch {
+      return res.status(401).json({ message: 'Invalid or expired refresh token.' });
+    }
+
+    // Confirm the token matches what is stored in the DB
+    const user = await User.findOne({ _id: decoded.id, refreshToken });
+    if (!user) {
+      return res.status(401).json({ message: 'Refresh token not recognised.' });
+    }
+
+    // Issue a new 1-hour access token
+    const newAccessToken = jwt.sign(
+      { id: user._id.toString(), email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    return res.status(200).json({ token: newAccessToken });
+  } catch (err) {
+    console.error('Refresh error:', err.message);
+    return res.status(500).json({ message: 'Server error during token refresh.' });
+  }
+});
+
+// ── POST /reset-password ──────────────────────────────────────────────────────
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { resetToken, newPassword } = req.body;
+
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ message: 'resetToken and newPassword are required.' });
+    }
+
+    const user = await User.findOne({
+      resetToken,
+      resetTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired reset token.' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    await user.save();
+
+    return res.status(200).json({ message: 'Password reset successfully.' });
+  } catch (err) {
+    console.error('Reset password error:', err.message);
     return res.status(500).json({ message: 'Server error during password reset.' });
   }
 });
