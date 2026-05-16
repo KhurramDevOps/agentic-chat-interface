@@ -14,6 +14,8 @@ import io
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
+from gtts import gTTS  # type: ignore[import-untyped]
+from groq import AsyncGroq  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from app.api.deps import verify_api_key
@@ -86,8 +88,6 @@ async def transcribe_audio(
         )
 
     try:
-        from groq import AsyncGroq  # type: ignore[import-untyped]
-
         client = AsyncGroq(api_key=settings.groq_api_key)
         transcription = await client.audio.transcriptions.create(
             file=(filename, io.BytesIO(audio_bytes)),
@@ -145,7 +145,6 @@ async def text_to_speech(
 
     try:
         import asyncio  # noqa: PLC0415
-        from gtts import gTTS  # type: ignore[import-untyped]
 
         buf = io.BytesIO()
 
@@ -167,12 +166,6 @@ async def text_to_speech(
             headers={"Content-Disposition": "inline; filename=speech.mp3"},
         )
 
-    except ImportError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"code": "GTTS_MISSING",
-                               "message": "gtts package is not installed. Run: uv add gtts", "request_id": "-"}},
-        )
     except Exception as exc:
         logger.exception("TTS failed")
         raise HTTPException(
