@@ -10,7 +10,7 @@ import axios from 'axios';
  * Refresh token: localStorage (survives page refresh).
  */
 
-const GATEWAY = process.env.REACT_APP_GATEWAY_URL || 'http://localhost:3001';
+const GATEWAY = process.env.REACT_APP_API_URL || 'http://localhost:5001';
 
 const useAuthStore = create((set, get) => ({
   user: null,

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import useChatStore from '../store/chatStore';
 
-const WS_BASE = process.env.REACT_APP_WS_URL || 'ws://localhost:8000';
+const WS_BASE = process.env.REACT_APP_WS_URL || 'ws://localhost:5001';
 const MAX_RETRIES = 5;
 const RETRY_BASE_MS = 1500;
 
