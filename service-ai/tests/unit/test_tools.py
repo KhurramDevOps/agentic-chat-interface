@@ -9,7 +9,7 @@ Unit tests for all agent tools:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -26,21 +26,20 @@ def _run(code: str) -> str:
     return _run_python_impl(code)
 
 
-def _fetch(url: str, html: str = "<p>Hello</p>") -> str:
+async def _fetch(url: str, html: str = "Hello") -> str:
     from app.agents.domain_agents import _fetch_url_impl
-    import httpx
 
     mock_resp = MagicMock()
     mock_resp.text = html
     mock_resp.raise_for_status = MagicMock()
 
     mock_client = MagicMock()
-    mock_client.__enter__ = MagicMock(return_value=mock_client)
-    mock_client.__exit__ = MagicMock(return_value=False)
-    mock_client.get = MagicMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_resp)
 
-    with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-        return _fetch_url_impl(url)
+    with patch("app.agents.domain_agents.httpx.AsyncClient", return_value=mock_client):
+        return await _fetch_url_impl(url)
 
 
 # ── calculate ─────────────────────────────────────────────────────────────────
@@ -166,44 +165,38 @@ class TestRunPython:
 
 class TestFetchUrl:
 
-    def test_strips_html_tags(self):
-        result = _fetch("https://example.com", "<html><body><h1>Title</h1><p>Body text</p></body></html>")
-        assert "<html>" not in result
-        assert "<h1>" not in result
+    @pytest.mark.asyncio
+    async def test_fetches_allowlisted_url(self):
+        result = await _fetch("https://api.tavily.com/search", "Title\nBody text")
         assert "Title" in result
         assert "Body text" in result
 
-    def test_rejects_ftp_url(self):
+    @pytest.mark.asyncio
+    async def test_rejects_ftp_url(self):
         from app.agents.domain_agents import _fetch_url_impl
-        result = _fetch_url_impl("ftp://example.com")
+        result = await _fetch_url_impl("ftp://example.com")
         assert "Error" in result
 
-    def test_rejects_empty_url(self):
+    @pytest.mark.asyncio
+    async def test_rejects_empty_url(self):
         from app.agents.domain_agents import _fetch_url_impl
-        result = _fetch_url_impl("   ")
+        result = await _fetch_url_impl("   ")
         assert "Error" in result
 
-    def test_cleans_markdown_link_format(self):
-        """LLM may pass '[text](https://url)' — must extract the URL."""
-        result = _fetch("[Click here](https://example.com)", "<p>Content</p>")
-        assert "Content" in result
+    @pytest.mark.asyncio
+    async def test_rejects_non_allowlisted_url(self):
+        from app.agents.domain_agents import _fetch_url_impl
+        result = await _fetch_url_impl("https://example.com")
+        assert "allowlist" in result
 
-    def test_cleans_bare_markdown_url(self):
-        """LLM may pass '[https://url](https://url)' — must extract the URL."""
-        result = _fetch("[https://example.com](https://example.com)", "<p>Data</p>")
-        assert "Data" in result
+    @pytest.mark.asyncio
+    async def test_truncates_long_content(self):
+        long_text = "x" * 20000
+        result = await _fetch("https://api.tavily.com/search", long_text)
+        assert len(result) == 3000
 
-    def test_cleans_angle_bracket_url(self):
-        """LLM may pass '<https://url>' — must extract the URL."""
-        result = _fetch("<https://example.com>", "<p>Info</p>")
-        assert "Info" in result
-
-    def test_truncates_long_content(self):
-        long_html = "<p>" + "x" * 20000 + "</p>"
-        result = _fetch("https://example.com", long_html)
-        assert "truncated" in result
-
-    def test_http_error_returns_message(self):
+    @pytest.mark.asyncio
+    async def test_http_error_returns_message(self):
         import httpx
         from app.agents.domain_agents import _fetch_url_impl
 
@@ -212,11 +205,12 @@ class TestFetchUrl:
         http_err = httpx.HTTPStatusError("Not Found", request=MagicMock(), response=mock_resp)
 
         mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.get = MagicMock(side_effect=http_err)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(side_effect=http_err)
 
-        with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-            result = _fetch_url_impl("https://example.com/missing")
+        with patch("app.agents.domain_agents.httpx.AsyncClient", return_value=mock_client):
+            result = await _fetch_url_impl("https://api.tavily.com/missing")
 
-        assert "404" in result
+        assert "Error fetching URL" in result
+        assert "Not Found" in result

@@ -1,0 +1,4 @@
+interface:
+  display_name: "FastAPI OpenAI Chat Review"
+  short_description: "Review FastAPI chat payload contracts"
+  default_prompt: "Use $fastapi-openai-chat-review to review my FastAPI chat endpoints against OpenAI-style payloads and Pydantic validation."

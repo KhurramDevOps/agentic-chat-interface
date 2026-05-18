@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from groq import AsyncGroq  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
-from app.api.deps import verify_api_key
+from app.api.deps import CurrentUser, verify_api_key
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -50,6 +50,7 @@ class VisionResponse(BaseModel):
 )
 async def analyse_image(
     file: UploadFile,
+    user: CurrentUser,
     prompt: str = Form(default="Describe this image in detail."),
 ) -> VisionResponse:
     """

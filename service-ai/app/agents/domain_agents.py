@@ -25,6 +25,11 @@ from app.core.type_guards import ensure_dict, ensure_str, safe_get
 
 logger = get_logger(__name__)
 
+FETCH_URL_ALLOWLIST = [
+    "https://api.tavily.com",
+    "https://image.pollinations.ai",
+]
+
 
 # ── ResearchAgent tools ───────────────────────────────────────────────────────
 
@@ -73,46 +78,32 @@ def tavily_search(query: str) -> str:
         return f"Search encountered an error: {exc}"
 
 
-def _fetch_url_impl(url: str) -> str:
+async def _fetch_url_impl(url: str) -> str:
     """Raw implementation — testable without the @function_tool wrapper."""
-    import re  # noqa: PLC0415
+    from urllib.parse import urlparse  # noqa: PLC0415
 
     ensure_str(url, "fetch_url.url")
     url = url.strip()
 
-    md_match = re.search(r'\(?(https?://[^\s\)\]>]+)', url)
-    if md_match:
-        url = md_match.group(1)
-    url = re.sub(r'[\[\]<>]', '', url).strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"https"} or not parsed.netloc:
+        return "Error: URL must be a valid https URL."
 
-    if not url.startswith(("http://", "https://")):
-        return "Error: URL must start with http:// or https://"
+    if not any(url.startswith(allowed) for allowed in FETCH_URL_ALLOWLIST):
+        return f"Error: URL not in allowlist. Allowed domains: {FETCH_URL_ALLOWLIST}"
 
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
-            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; service-ai/1.0)"})
             resp.raise_for_status()
-            html = resp.text
-
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text).strip()
-
-        _MAX = 8000
-        truncated = text[:_MAX]
-        suffix = "... [truncated]" if len(text) > _MAX else ""
-
-        logger.info("fetch_url — url=%s, chars=%d", url, len(text))
-        return f"Content from {url}:\n\n{truncated}{suffix}"
-
-    except httpx.HTTPStatusError as exc:
-        return f"Error: HTTP {exc.response.status_code} fetching {url}"
+            return resp.text[:3000]
     except Exception as exc:
         logger.warning("fetch_url failed — url=%s, error=%s", url, exc)
         return f"Error fetching URL: {exc}"
 
 
 @function_tool
-def fetch_url(url: str) -> str:
+async def fetch_url(url: str) -> str:
     """
     Fetch the text content of a web page and return it stripped of HTML tags.
 
@@ -130,7 +121,7 @@ def fetch_url(url: str) -> str:
     Returns:
         Plain text content of the page (truncated to 8000 chars).
     """
-    return _fetch_url_impl(url)
+    return await _fetch_url_impl(url)
 
 
 def _calculate_impl(expression: str) -> str:
@@ -230,7 +221,6 @@ def _run_python_impl(code: str) -> str:
         return f"Error running script: {exc}"
 
 
-@function_tool
 def run_python(code: str) -> str:
     """
     Execute a sandboxed Python script and return its stdout output.
@@ -249,7 +239,9 @@ def run_python(code: str) -> str:
     Returns:
         The stdout output of the script, or an error/timeout message.
     """
-    return _run_python_impl(code)
+    # DISABLED: Executes model-supplied code in a local subprocess.
+    # Re-enable only inside a proper sandbox with no network/file access.
+    return "Error: run_python is disabled in production for safety."
 
 
 # ── Document analysis tool (Phase 6) ─────────────────────────────────────────
@@ -439,13 +431,13 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
         mcp_servers:   List of MCPServerStdio instances injected at runtime.
         model_settings: Optional ModelSettings (e.g. parallel_tool_calls=False for Groq).
     """
-    base_tools = [tavily_search, analyze_document, fetch_url, calculate, run_python]
+    base_tools = [tavily_search, analyze_document, fetch_url, calculate]
     instructions = (
         "You are a research and analysis specialist. "
         "Use tavily_search for live web data. "
         "Use fetch_url to read a specific URL the user provides. "
         "Use calculate for any arithmetic — never do math in your head. "
-        "Use run_python for data analysis, transformations, or complex calculations. "
+            "Do not run code; run_python is disabled for public deployment. "
         "Use analyze_document when the user provides a doc_id to analyze an uploaded PDF. "
         "Always cite your sources and present findings clearly."
     )
@@ -455,11 +447,11 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
             name="ResearchAgent",
             handoff_description=(
                 "Specialist for web search, URL fetching, data analysis, math, "
-                "code execution, and analyzing uploaded PDF documents."
+            "safe URL fetching, calculations, and analyzing uploaded PDF documents."
             ),
             instructions=instructions,
             mcp_servers=mcp_servers,
-            tools=[analyze_document, fetch_url, calculate, run_python],
+            tools=[analyze_document, fetch_url, calculate],
             model=model,
             model_settings=model_settings,
         )
@@ -468,7 +460,7 @@ def build_research_agent(model: str, mcp_servers: list | None = None, model_sett
             name="ResearchAgent",
             handoff_description=(
                 "Specialist for web search, URL fetching, data analysis, math, "
-                "code execution, and analyzing uploaded PDF documents."
+                "safe URL fetching, calculations, and analyzing uploaded PDF documents."
             ),
             instructions=instructions,
             tools=base_tools,

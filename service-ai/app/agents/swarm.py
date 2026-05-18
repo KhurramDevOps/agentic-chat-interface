@@ -83,10 +83,10 @@ async def initialise_swarm() -> Agent:
     if _triage_agent is not None:
         return _triage_agent
 
-    # Wire the Gemini OpenAI-compatible client
+    # Wire the active OpenAI-compatible client
     client = get_openai_client()
     set_default_openai_client(client)
-    logger.info("Swarm client wired to Gemini OpenAI-compatible endpoint.")
+    logger.info("Swarm client wired to active OpenAI-compatible endpoint.")
 
     # Fetch MCP servers for the ResearchAgent
     from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
@@ -165,7 +165,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
     history_msgs = [
         {"role": msg.role, "content": msg.content}
-        for msg in request.messages
+        for msg in request.normalized_messages()
     ]
 
     input_messages = [system_msg] + history_msgs
@@ -180,7 +180,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         request.request_id,
         len(user_input),
         context_id,
-        len(request.messages),
+        len(request.normalized_messages()),
     )
 
     # context_variables are injected into tool functions via context_variables: dict param
@@ -239,7 +239,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
             handoff_chain=handoff_chain,
             turns_used=result._current_turn,
         ),
-        model=request.model,
+        model=request.model or _cfg().active_model,
         usage={
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -248,7 +248,10 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     )
 
 
-async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
+async def stream_swarm(
+    request: ChatRequest,
+    result_container: dict | None = None,
+) -> AsyncIterator[str]:
     """
     Execute a ChatRequest through the TriageAgent swarm in streaming mode.
 
@@ -257,12 +260,12 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     tokens are yielded to the caller.
 
     After the iterator is exhausted, the caller can read exact token usage
-    from the `_last_stream_result` module variable via get_last_stream_usage().
+    from the caller-owned result_container.
 
     Usage:
         async for delta in stream_swarm(request):
             await websocket.send_text(delta)
-        usage = get_last_stream_usage()
+        usage = get_stream_usage(result_container.get("result"))
 
     Args:
         request: Validated ChatRequest with full history merged in.
@@ -270,7 +273,6 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Yields:
         str — incremental text chunks from the LLM.
     """
-    global _last_stream_result
     from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
 
     triage = get_swarm()
@@ -280,12 +282,12 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         "role": "system",
         "content": f"session_id: {context_id}",
     }
-    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.normalized_messages()]
     input_messages = [system_msg] + history_msgs
 
     logger.info(
         "stream_swarm — request_id=%s, context_id=%s, history_turns=%d",
-        request.request_id, context_id, len(request.messages),
+        request.request_id, context_id, len(request.normalized_messages()),
     )
 
     context_variables = {
@@ -336,8 +338,9 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
                                "request_id": request.request_id}},
         )
 
-    # Store result so caller can read exact token usage after stream completes
-    _last_stream_result = result
+    if result_container is not None:
+        result_container["result"] = result
+        result_container["usage"] = get_stream_usage(result)
 
     logger.info(
         "stream_swarm complete — request_id=%s, last_agent=%s",
@@ -345,19 +348,11 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         result.last_agent.name if result.last_agent else "unknown",
     )
 
-
-# Module-level storage for the most recent stream result (per-process, not per-request).
-# Safe for single-worker deployments; for multi-worker use a request-scoped store.
-_last_stream_result = None
-
-
-def get_last_stream_usage() -> dict[str, int]:
+def get_stream_usage(result) -> dict[str, int]:
     """
-    Return exact token usage from the most recently completed stream_swarm call.
-    Must be called immediately after the stream is exhausted.
+    Return exact token usage from one request-scoped streaming result.
     Returns zeros if no result is available.
     """
-    result = _last_stream_result
     if result is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

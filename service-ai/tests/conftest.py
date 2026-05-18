@@ -11,7 +11,24 @@ from fastapi.testclient import TestClient
 
 
 API_KEY = "super-secret-key"
-API_HEADERS = {"X-API-Key": API_KEY}
+API_HEADERS = {
+    "X-API-Key": API_KEY,
+    "x-user-id": "test-user-123",
+    "x-user-email": "test@example.com",
+}
+
+
+@pytest.fixture()
+def auth_headers():
+    return {
+        "x-user-id": "test-user-123",
+        "x-user-email": "test@example.com",
+    }
+
+
+@pytest.fixture()
+def api_headers():
+    return dict(API_HEADERS)
 
 
 @pytest.fixture(scope="session")

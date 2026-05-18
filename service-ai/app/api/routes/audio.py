@@ -18,7 +18,7 @@ from gtts import gTTS  # type: ignore[import-untyped]
 from groq import AsyncGroq  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
-from app.api.deps import verify_api_key
+from app.api.deps import CurrentUser, verify_api_key
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -45,6 +45,7 @@ class TranscriptionResponse(BaseModel):
 async def transcribe_audio(
     request: Request,
     file: UploadFile,
+    user: CurrentUser,
 ) -> TranscriptionResponse:
     """
     Transcribe an uploaded audio file using Groq's whisper-large-v3 model.
@@ -124,6 +125,7 @@ async def transcribe_audio(
     dependencies=[Depends(verify_api_key)],
 )
 async def text_to_speech(
+    user: CurrentUser,
     text: str = Form(..., description="Text to synthesise into speech."),
     lang: str = Form(default="en", description="BCP-47 language code, e.g. 'en', 'ur', 'fr'."),
 ) -> StreamingResponse:
