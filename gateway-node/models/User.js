@@ -24,19 +24,17 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Password is required'],
     },
-    passwordResetToken: {
+    resetToken: {
       type: String,
       default: null,
-      select: false,
     },
-    passwordResetExpires: {
+    resetTokenExpiry: {
       type: Date,
       default: null,
     },
     refreshToken: {
       type: String,
       default: null,
-      select: false,
     },
   },
   { timestamps: true }

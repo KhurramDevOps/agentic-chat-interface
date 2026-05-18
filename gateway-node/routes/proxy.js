@@ -5,7 +5,7 @@
  *
  * GET    /api/history/:sessionId  → Python /api/v1/chat/history/:sessionId
  * DELETE /api/history/:sessionId  → Python /api/v1/chat/history/:sessionId
- * GET    /api/usage               → Python /api/v1/users/usage
+ * GET    /api/usage               → Python /api/v1/users/:userId/usage
  *
  * All routes require a valid JWT and inject X-User-ID + X-API-Key upstream.
  */
@@ -25,7 +25,6 @@ function buildHeaders(req) {
   return {
     'Content-Type': 'application/json',
     'X-User-ID': req.user.id,
-    'X-User-Email': req.user.email || '',
     'X-API-Key': process.env.PYTHON_API_KEY || '',
     'X-Request-ID': req.headers['x-request-id'] || crypto.randomUUID(),
   };
@@ -90,7 +89,7 @@ router.delete('/history/:sessionId', verifyToken, async (req, res) => {
 
 router.get('/usage', verifyToken, async (req, res) => {
   try {
-    const url = `${pythonOrigin()}/api/v1/users/usage`;
+    const url = `${pythonOrigin()}/api/v1/users/${req.user.id}/usage`;
     const response = await axios.get(url, {
       headers: buildHeaders(req),
       timeout: PROXY_TIMEOUT_MS,

@@ -16,25 +16,6 @@ const router = express.Router();
 
 const PROXY_TIMEOUT_MS = 30000;
 
-function buildPayload(req) {
-  const requestId = crypto.randomUUID();
-  return {
-    ...req.body,
-    request_id: requestId,
-    session_id: req.body.session_id || req.body.memory_context_id || null,
-  };
-}
-
-function buildHeaders(req, requestId, apiKey) {
-  return {
-    'Content-Type': 'application/json',
-    'X-User-ID': req.user.id,
-    'X-User-Email': req.user.email || '',
-    'X-API-Key': apiKey,
-    'X-Request-ID': requestId,
-  };
-}
-
 // ── POST / — non-streaming completions ───────────────────────────────────────
 
 router.post('/', verifyToken, async (req, res) => {
@@ -42,10 +23,17 @@ router.post('/', verifyToken, async (req, res) => {
     const pythonUrl = process.env.PYTHON_API_URL;
     const apiKey = process.env.PYTHON_API_KEY;
 
-    const body = buildPayload(req);
+    const body = {
+      request_id: req.body.request_id || crypto.randomUUID(),
+      ...req.body,
+    };
 
     const response = await axios.post(pythonUrl, body, {
-      headers: buildHeaders(req, body.request_id, apiKey),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-ID': req.user.id,
+        'X-API-Key': apiKey,
+      },
       timeout: PROXY_TIMEOUT_MS,
     });
 
@@ -67,11 +55,18 @@ router.post('/stream', verifyToken, async (req, res) => {
       (process.env.PYTHON_API_URL || '').replace('/completions', '/stream');
     const apiKey = process.env.PYTHON_API_KEY;
 
-    const body = buildPayload(req);
+    const body = {
+      request_id: req.body.request_id || crypto.randomUUID(),
+      ...req.body,
+    };
 
     // Make the upstream call FIRST — don't flush SSE headers until we know it succeeded
     const upstream = await axios.post(pythonStreamUrl, body, {
-      headers: buildHeaders(req, body.request_id, apiKey),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-ID': req.user.id,
+        'X-API-Key': apiKey,
+      },
       responseType: 'stream',
       timeout: PROXY_TIMEOUT_MS,
     });
