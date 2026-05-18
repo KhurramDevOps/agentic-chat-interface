@@ -127,6 +127,7 @@ async def websocket_chat(
                 continue
 
             request_id = payload.get("request_id") or client_id
+            user_id    = payload.get("user_id") or client_id  # Issue 3: Mem0 user key
             messages_raw = payload.get("messages", [])
 
             if not messages_raw:
