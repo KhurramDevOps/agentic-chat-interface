@@ -27,6 +27,9 @@ from app.schemas.streaming import (
 )
 from app.services.streaming_service import ConnectionManager, get_connection_manager
 
+WS_HEADERS = {"x-user-id": "test-user-123", "x-user-email": "test@example.com"}
+WS_API_KEY = "super-secret-key"
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -282,7 +285,10 @@ class TestWebSocketEndpoint:
 
         with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
-                with client.websocket_connect("/api/v1/stream/ws/test-ws-client") as ws:
+                with client.websocket_connect(
+                    f"/api/v1/stream/ws/test-ws-client?api_key={WS_API_KEY}",
+                    headers=WS_HEADERS,
+                ) as ws:
                     ws.send_text(json.dumps({
                         "request_id": "ws-req-1",
                         "messages": [{"role": "user", "content": "Hello!"}],
@@ -307,7 +313,10 @@ class TestWebSocketEndpoint:
 
         with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
-                with client.websocket_connect("/api/v1/stream/ws/client-42") as ws:
+                with client.websocket_connect(
+                    f"/api/v1/stream/ws/client-42?api_key={WS_API_KEY}",
+                    headers=WS_HEADERS,
+                ) as ws:
                     ws.send_text(json.dumps({
                         "request_id": "ws-req-2",
                         "messages": [{"role": "user", "content": "What is the answer?"}],
@@ -325,7 +334,10 @@ class TestWebSocketEndpoint:
         from app.main import app
 
         with TestClient(app) as client:
-            with client.websocket_connect("/api/v1/stream/ws/bad-client") as ws:
+            with client.websocket_connect(
+                f"/api/v1/stream/ws/bad-client?api_key={WS_API_KEY}",
+                headers=WS_HEADERS,
+            ) as ws:
                 ws.send_text("this is not json {{{{")
                 raw = ws.receive_text()
                 event = json.loads(raw)
@@ -341,7 +353,10 @@ class TestWebSocketEndpoint:
 
         with patch("app.api.routes.stream.stream_swarm", side_effect=mock_stream):
             with TestClient(app) as client:
-                with client.websocket_connect("/api/v1/stream/ws/seq-client") as ws:
+                with client.websocket_connect(
+                    f"/api/v1/stream/ws/seq-client?api_key={WS_API_KEY}",
+                    headers=WS_HEADERS,
+                ) as ws:
                     ws.send_text(json.dumps({
                         "request_id": "seq-test",
                         "messages": [{"role": "user", "content": "test"}],

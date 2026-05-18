@@ -19,7 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-API_HEADERS = {"X-API-Key": "super-secret-key"}
+API_HEADERS = {
+    "X-API-Key": "super-secret-key",
+    "x-user-id": "test-user-123",
+    "x-user-email": "test@example.com",
+}
 
 
 def _client():
@@ -95,7 +99,7 @@ class TestAuthEnforcement:
         assert resp.status_code == 401
 
     def test_users_usage_requires_key(self):
-        resp = _client().get("/api/v1/users/some-user/usage")
+        resp = _client().get("/api/v1/users/usage")
         assert resp.status_code == 401
 
     def test_history_delete_requires_key(self):
@@ -119,29 +123,29 @@ class TestUsersEndpoints:
 
     def test_get_usage_returns_correct_fields(self):
         mock_doc = {
-            "user_id": "anon_u1", "session_id": "u1",
-            "is_anonymous": True, "total_tokens_used": 100,
+            "user_id": "test-user-123", "session_id": "u1",
+            "is_anonymous": False, "total_tokens_used": 100,
             "prompt_tokens": 60, "completion_tokens": 40,
         }
-        with patch("app.api.routes.users.get_or_create_user",
+        with patch("app.api.routes.users.read_user_usage",
                    new=AsyncMock(return_value=mock_doc)):
-            resp = _client().get("/api/v1/users/anon_u1/usage", headers=API_HEADERS)
+            resp = _client().get("/api/v1/users/usage", headers=API_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["total_tokens_used"] == 100
         assert data["prompt_tokens"] == 60
         assert data["completion_tokens"] == 40
-        assert data["is_anonymous"] is True
+        assert data["is_anonymous"] is False
 
     def test_get_usage_zero_for_new_user(self):
         mock_doc = {
-            "user_id": "anon_new", "session_id": "new",
-            "is_anonymous": True, "total_tokens_used": 0,
+            "user_id": "test-user-123", "session_id": "new",
+            "is_anonymous": False, "total_tokens_used": 0,
             "prompt_tokens": 0, "completion_tokens": 0,
         }
-        with patch("app.api.routes.users.get_or_create_user",
+        with patch("app.api.routes.users.read_user_usage",
                    new=AsyncMock(return_value=mock_doc)):
-            resp = _client().get("/api/v1/users/anon_new/usage", headers=API_HEADERS)
+            resp = _client().get("/api/v1/users/usage", headers=API_HEADERS)
         assert resp.status_code == 200
         assert resp.json()["total_tokens_used"] == 0
 
@@ -151,22 +155,22 @@ class TestUsersEndpoints:
 class TestHistoryDelete:
 
     def test_delete_returns_204(self):
-        with patch("app.api.routes.users.clear_history", new=AsyncMock()) as m:
+        with patch("app.api.routes.users.history_service.delete_history", new=AsyncMock()) as m:
             resp = _client().delete("/api/v1/chat/history/sess-1", headers=API_HEADERS)
         assert resp.status_code == 204
-        m.assert_called_once_with("sess-1")
+        m.assert_called_once_with(session_id="sess-1", user_id="test-user-123")
 
     def test_delete_different_sessions_isolated(self):
         calls = []
-        async def _clear(sid):
-            calls.append(sid)
+        async def _clear(session_id, user_id):
+            calls.append((session_id, user_id))
 
-        with patch("app.api.routes.users.clear_history", side_effect=_clear):
+        with patch("app.api.routes.users.history_service.delete_history", side_effect=_clear):
             _client().delete("/api/v1/chat/history/sess-a", headers=API_HEADERS)
             _client().delete("/api/v1/chat/history/sess-b", headers=API_HEADERS)
 
-        assert "sess-a" in calls
-        assert "sess-b" in calls
+        assert ("sess-a", "test-user-123") in calls
+        assert ("sess-b", "test-user-123") in calls
 
 
 # ── Vision endpoint ───────────────────────────────────────────────────────────

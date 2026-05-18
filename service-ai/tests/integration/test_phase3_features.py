@@ -2,7 +2,7 @@
 tests/integration/test_phase3_features.py
 ──────────────────────────────────────────
 Integration tests for Phase 3 features:
-  - GET  /api/v1/users/{user_id}/usage
+  - GET  /api/v1/users/usage
   - DELETE /api/v1/chat/history/{session_id}
   - GET  /api/v1/health/detailed
   - calculate tool
@@ -26,7 +26,11 @@ def _client():
     return TestClient(app)
 
 
-API_KEY_HEADERS = {"X-API-Key": "super-secret-key"}
+API_KEY_HEADERS = {
+    "X-API-Key": "super-secret-key",
+    "x-user-id": "test-user-123",
+    "x-user-email": "test@example.com",
+}
 
 
 # ── Group 1: Users endpoint ───────────────────────────────────────────────────
@@ -35,19 +39,19 @@ class TestUsersEndpoint:
 
     def test_get_usage_returns_200(self):
         mock_doc = {
-            "user_id": "anon_test-user",
+            "user_id": "test-user-123",
             "session_id": "test-user",
-            "is_anonymous": True,
+            "is_anonymous": False,
             "total_tokens_used": 500,
             "prompt_tokens": 300,
             "completion_tokens": 200,
         }
         with patch(
-            "app.api.routes.users.get_or_create_user",
+            "app.api.routes.users.read_user_usage",
             new=AsyncMock(return_value=mock_doc),
         ):
             resp = _client().get(
-                "/api/v1/users/anon_test-user/usage",
+                "/api/v1/users/usage",
                 headers=API_KEY_HEADERS,
             )
         assert resp.status_code == 200
@@ -57,7 +61,7 @@ class TestUsersEndpoint:
         assert data["completion_tokens"] == 200
 
     def test_get_usage_requires_api_key(self):
-        resp = _client().get("/api/v1/users/some-user/usage")
+        resp = _client().get("/api/v1/users/usage")
         assert resp.status_code == 401
 
 
@@ -67,7 +71,7 @@ class TestHistoryDelete:
 
     def test_delete_history_returns_204(self):
         with patch(
-            "app.api.routes.users.clear_history",
+            "app.api.routes.users.history_service.delete_history",
             new=AsyncMock(),
         ) as mock_clear:
             resp = _client().delete(
@@ -75,7 +79,7 @@ class TestHistoryDelete:
                 headers=API_KEY_HEADERS,
             )
         assert resp.status_code == 204
-        mock_clear.assert_called_once_with("my-session")
+        mock_clear.assert_called_once_with(session_id="my-session", user_id="test-user-123")
 
     def test_delete_history_requires_api_key(self):
         resp = _client().delete("/api/v1/chat/history/my-session")
@@ -161,26 +165,27 @@ class TestRunPythonTool:
 
 class TestFetchUrlTool:
 
-    def test_rejects_non_http_url(self):
+    @pytest.mark.asyncio
+    async def test_rejects_non_http_url(self):
         from app.agents.domain_agents import _fetch_url_impl
-        assert "Error" in _fetch_url_impl("ftp://example.com")
+        assert "Error" in await _fetch_url_impl("ftp://example.com")
 
-    def test_fetches_and_strips_html(self):
+    @pytest.mark.asyncio
+    async def test_fetches_allowlisted_content(self):
         from app.agents.domain_agents import _fetch_url_impl
 
         mock_response = MagicMock()
-        mock_response.text = "<html><body><h1>Hello</h1><p>World</p></body></html>"
+        mock_response.text = "Hello\nWorld"
         mock_response.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.get = MagicMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
 
-        with patch("app.agents.domain_agents.httpx.Client", return_value=mock_client):
-            result = _fetch_url_impl("https://example.com")
+        with patch("app.agents.domain_agents.httpx.AsyncClient", return_value=mock_client):
+            result = await _fetch_url_impl("https://api.tavily.com/search")
 
-        assert "<html>" not in result
         assert "Hello" in result
         assert "World" in result
 

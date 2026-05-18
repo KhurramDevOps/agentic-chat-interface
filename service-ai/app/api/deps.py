@@ -23,10 +23,11 @@ All error responses follow the envelope:
 
 from __future__ import annotations
 
+import os
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -35,6 +36,13 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+SERVICE_API_KEY = os.getenv("API_KEY")
+_ENVIRONMENT = os.getenv("ENVIRONMENT") or os.getenv("APP_ENV")
+if not SERVICE_API_KEY and _ENVIRONMENT == "production":
+    raise RuntimeError(
+        "API_KEY is not set. Service cannot start in production without it."
+    )
 
 
 # ── Error envelope models ─────────────────────────────────────────────────────
@@ -173,30 +181,45 @@ def get_user_key(request: Request) -> str:
       2. X-API-Key header  (service-to-service or dev clients)
       3. Remote IP address (anonymous fallback)
     """
-    return (
-        request.headers.get("x-user-id")
-        or request.headers.get("x-api-key")
-        or request.headers.get("X-API-Key")
-        or request.client.host
-        if request.client else "unknown"
-    )
+    if request.headers.get("x-user-id"):
+        return request.headers["x-user-id"]
+    if request.headers.get("x-api-key"):
+        return request.headers["x-api-key"]
+    return request.client.host if request.client else "unknown"
 
 
-async def verify_api_key(request: Request) -> None:
+async def verify_api_key(
+    x_api_key: str | None = Header(None, alias="x-api-key"),
+) -> None:
     """
     Dependency that enforces API key authentication.
-    Reads X-API-Key header and compares to settings.api_key.
-    If api_key is empty (dev mode), auth is skipped.
+    Reads X-API-Key header and compares to API_KEY.
     """
-    settings = get_settings()
-    if not settings.api_key:
-        return  # auth disabled in dev
-    key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
-    if not key or key != settings.api_key:
+    expected_key = SERVICE_API_KEY or get_settings().api_key
+    if expected_key and x_api_key != expected_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": {"code": "UNAUTHORIZED", "message": "Invalid or missing API key.", "request_id": _extract_request_id(request)}},
+            detail="Invalid API key",
         )
+
+
+async def get_current_user(
+    x_user_id: str | None = Header(None, alias="x-user-id"),
+    x_user_email: str | None = Header(None, alias="x-user-email"),
+) -> dict:
+    """
+    Validates user identity forwarded by the Node.js gateway.
+    HARD REJECT if X-User-ID is missing — no anonymous users allowed.
+    """
+    if not x_user_id or x_user_id.strip() == "":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-User-ID header is required. All requests must route through the gateway.",
+        )
+    return {"user_id": x_user_id, "email": x_user_email or ""}
+
+
+CurrentUser = Annotated[dict, Depends(get_current_user)]
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
