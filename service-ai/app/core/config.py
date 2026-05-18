@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         description="Master API key for securing chat endpoints. Empty = auth disabled (dev only).",
     )
     allowed_origins: str = Field(
-        default="http://localhost:5173,http://localhost:3000",
+        default="http://localhost:3000",
         description="Comma-separated browser origins allowed by CORS.",
     )
 
