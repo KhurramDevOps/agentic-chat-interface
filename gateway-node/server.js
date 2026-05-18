@@ -33,7 +33,7 @@ app.use(helmet());
 
 const allowedOrigins = process.env.FRONTEND_URL
   ? [process.env.FRONTEND_URL]
-  : ['http://localhost:5173', 'http://localhost:3000'];
+  : ['http://localhost:3000'];
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -105,7 +105,7 @@ app.use('/api/v1/stream', wsProxy);
 // ── Start (only when run directly) ───────────────────────────────────────────
 
 if (require.main === module) {
-  const PORT = process.env.PORT || 5000;
+  const PORT = process.env.PORT || 5001;
 
   connectDB()
     .then(() => {
