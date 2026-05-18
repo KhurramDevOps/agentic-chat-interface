@@ -6,9 +6,9 @@ User identity and token metering service.
 Collection: chotuu_db.users
 Document shape:
   {
-    "user_id":           "anon_<session_id>",   # or real user_id from gateway
+    "user_id":           "gateway-user-id",
     "session_id":        "test-user",
-    "is_anonymous":      true,
+    "is_anonymous":      false,
     "total_tokens_used": 1234,
     "prompt_tokens":     800,
     "completion_tokens": 434,
@@ -51,14 +51,13 @@ async def get_or_create_user(session_id: str, user_id: str | None = None) -> dic
     """
     Return the user document for the given session_id, creating one if absent.
 
-    If user_id is provided (e.g. from a gateway JWT), it is used as the
-    primary identifier. Otherwise an anonymous profile is created keyed by
-    session_id with a prefixed anon_ user_id.
-
     Returns the full user document (without MongoDB _id).
     """
+    if not user_id or not user_id.strip():
+        raise ValueError("user_id is required; anonymous service users are disabled.")
+
     col = _get_collection()
-    effective_user_id = user_id or f"anon_{session_id}"
+    effective_user_id = user_id
 
     try:
         doc = await col.find_one(
@@ -77,7 +76,7 @@ async def get_or_create_user(session_id: str, user_id: str | None = None) -> dic
         new_user = {
             "user_id": effective_user_id,
             "session_id": session_id,
-            "is_anonymous": user_id is None,
+            "is_anonymous": False,
             "total_tokens_used": 0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -86,22 +85,14 @@ async def get_or_create_user(session_id: str, user_id: str | None = None) -> dic
         }
         await col.insert_one(new_user)
         logger.info(
-            "UserService: new user created — user_id=%s, anonymous=%s",
-            effective_user_id, user_id is None,
+            "UserService: new user created — user_id=%s",
+            effective_user_id,
         )
         return {k: v for k, v in new_user.items() if k != "_id"}
 
     except Exception as exc:
         logger.warning("get_or_create_user failed — session=%s, error=%s", session_id, exc)
-        # Return a transient in-memory profile so the request still succeeds
-        return {
-            "user_id": effective_user_id,
-            "session_id": session_id,
-            "is_anonymous": True,
-            "total_tokens_used": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-        }
+        raise
 
 
 async def record_token_usage(
@@ -114,11 +105,14 @@ async def record_token_usage(
     Atomically increment token counters for the user associated with session_id.
     Creates the user profile first if it doesn't exist.
     """
+    if not user_id or not user_id.strip():
+        raise ValueError("user_id is required to record token usage.")
+
     if prompt_tokens == 0 and completion_tokens == 0:
         return
 
     col = _get_collection()
-    effective_user_id = user_id or f"anon_{session_id}"
+    effective_user_id = user_id
     total = prompt_tokens + completion_tokens
 
     try:
@@ -142,6 +136,22 @@ async def record_token_usage(
         logger.warning(
             "record_token_usage failed — user_id=%s, error=%s", effective_user_id, exc
         )
+
+
+async def get_user_usage(user_id: str) -> dict:
+    if not user_id or not user_id.strip():
+        raise ValueError("user_id is required to read token usage.")
+    doc = await _get_collection().find_one({"user_id": user_id}, {"_id": 0})
+    if doc:
+        return doc
+    return {
+        "user_id": user_id,
+        "session_id": "",
+        "is_anonymous": False,
+        "total_tokens_used": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+    }
 
 
 def _now() -> str:

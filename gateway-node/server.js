@@ -30,7 +30,21 @@ const app = express();
 // ── Security & logging middleware ─────────────────────────────────────────────
 
 app.use(helmet());
-app.use(cors());
+
+const allowedOrigins = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL]
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    }
+  },
+  credentials: true,
+}));
 
 if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev'));
@@ -74,6 +88,7 @@ const wsProxy = createProxyMiddleware({
       proxyReq.setHeader('X-API-Key', process.env.PYTHON_API_KEY || '');
       if (req.user) {
         proxyReq.setHeader('X-User-ID', req.user.id || '');
+        proxyReq.setHeader('X-User-Email', req.user.email || '');
       }
     },
     error: (err, req, res) => {
@@ -128,6 +143,9 @@ if (require.main === module) {
 
         try {
           const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          if (!decoded || !decoded.id) {
+            throw new Error('invalid token payload');
+          }
           req.user = decoded;
         } catch (err) {
           console.warn('[WS] Rejected — invalid token:', err.message);

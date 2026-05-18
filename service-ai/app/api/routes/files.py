@@ -17,8 +17,9 @@ Constitution compliance:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 
+from app.api.deps import CurrentUser, verify_api_key
 from app.core.logging import get_logger
 from app.services.file_service import extract_pdf_text, get_document_store
 
@@ -29,8 +30,12 @@ _ALLOWED_CONTENT_TYPES = {"application/pdf"}
 _MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
-@router.post("/upload", status_code=status.HTTP_200_OK)
-async def upload_document(file: UploadFile) -> dict:
+@router.post(
+    "/upload",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_api_key)],
+)
+async def upload_document(file: UploadFile, user: CurrentUser) -> dict:
     """
     Upload a PDF document for in-memory RAG analysis.
 
@@ -89,7 +94,10 @@ async def upload_document(file: UploadFile) -> dict:
     store = get_document_store()
     doc_id = await store.store_document(text, filename=filename)
 
-    logger.info("Document uploaded — doc_id=%s, filename=%s", doc_id, filename)
+    logger.info(
+        "Document uploaded — doc_id=%s, filename=%s, user_id=%s",
+        doc_id, filename, user["user_id"],
+    )
 
     return {
         "doc_id": doc_id,

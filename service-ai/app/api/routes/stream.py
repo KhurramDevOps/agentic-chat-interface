@@ -23,74 +23,25 @@ Issue 4 fix: on the first turn of a session, a lightweight LLM call generates
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from app.agents.swarm import stream_swarm
+from app.agents.swarm import get_stream_usage, stream_swarm
+from app.api.deps import SERVICE_API_KEY
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.type_guards import ensure_dict
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.schemas.streaming import ChatStreamEvent
-from app.services.history_service import append_to_history, get_history, message_count
+from app.services import history_service, memory_service
 from app.services.streaming_service import get_connection_manager
 from app.services.user_service import record_token_usage
 
 logger = get_logger(__name__)
 router = APIRouter()
-
-
-# ── Mem0 helper ───────────────────────────────────────────────────────────────
-
-async def _get_mem0_context(user_id: str, query: str) -> str:
-    """
-    Query Mem0 for facts relevant to this user and query.
-    Returns a formatted string to inject into the system prompt.
-    Returns empty string if Mem0 is unavailable or no facts found.
-    """
-    try:
-        from mem0 import AsyncMemoryClient  # noqa: PLC0415
-        from app.core.config import get_settings  # noqa: PLC0415
-
-        settings = get_settings()
-        if not settings.mem0_api_key:
-            return ""
-
-        client = AsyncMemoryClient(api_key=settings.mem0_api_key)
-        results = await client.search(query=query, user_id=user_id, limit=5)
-
-        if not results:
-            return ""
-
-        facts = [r.get("memory", "") for r in results if r.get("memory")]
-        if not facts:
-            return ""
-
-        return "Relevant facts about this user:\n" + "\n".join(f"- {f}" for f in facts)
-
-    except Exception as exc:
-        logger.warning("Mem0 query failed — user_id=%s, error=%s", user_id, exc)
-        return ""
-
-
-async def _save_to_mem0(user_id: str, messages: list[dict]) -> None:
-    """
-    Save the current turn to Mem0 for long-term memory.
-    Fire-and-forget — errors are logged but never raised.
-    """
-    try:
-        from mem0 import AsyncMemoryClient  # noqa: PLC0415
-        from app.core.config import get_settings  # noqa: PLC0415
-
-        settings = get_settings()
-        if not settings.mem0_api_key:
-            return
-
-        client = AsyncMemoryClient(api_key=settings.mem0_api_key)
-        await client.add(messages=messages, user_id=user_id)
-
-    except Exception as exc:
-        logger.warning("Mem0 save failed — user_id=%s, error=%s", user_id, exc)
 
 
 # ── Title generation helper ───────────────────────────────────────────────────
@@ -101,14 +52,12 @@ async def _generate_title(user_message: str) -> str:
     Falls back to a truncated version of the message on failure.
     """
     try:
-        from openai import AsyncOpenAI  # noqa: PLC0415
-        from app.core.llm_proxy import get_openai_client  # noqa: PLC0415
+        from app.core.llm_proxy import chat_completion_with_fallback  # noqa: PLC0415
         from app.core.config import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        client: AsyncOpenAI = get_openai_client()
 
-        response = await client.chat.completions.create(
+        response = await chat_completion_with_fallback(
             model=settings.active_model,
             messages=[{
                 "role": "user",
@@ -131,8 +80,14 @@ async def _generate_title(user_message: str) -> str:
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
 
+@router.websocket("/ws")
 @router.websocket("/ws/{client_id}")
-async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
+async def websocket_chat(
+    websocket: WebSocket,
+    client_id: str | None = None,
+    token: str | None = Query(None),
+    api_key: str | None = Query(None),
+) -> None:
     """
     Persistent WebSocket endpoint for a single chat client.
 
@@ -145,6 +100,12 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
         "user_id":          "mongodb-user-id"   ← injected by frontend from JWT
       }
     """
+    user_id = _resolve_websocket_user_id(websocket, token=token, api_key=api_key)
+    if not user_id:
+        await websocket.close(code=1008)
+        return
+
+    client_id = client_id or user_id
     manager = get_connection_manager()
     await manager.connect(client_id, websocket)
     logger.info("WebSocket session started — client_id=%s", client_id)
@@ -166,7 +127,6 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 continue
 
             request_id = payload.get("request_id") or client_id
-            user_id    = payload.get("user_id") or client_id  # Issue 3: Mem0 user key
             messages_raw = payload.get("messages", [])
 
             if not messages_raw:
@@ -176,10 +136,11 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
             try:
                 request = ChatRequest(
                     request_id=request_id,
-                    messages=[ChatMessage(**m) for m in messages_raw],
-                    model=payload.get("model", "gemini/gemini-1.5-pro"),
+                    messages=[ChatMessage.model_validate(m) for m in messages_raw],
+                    model=payload.get("model") or get_settings().active_model,
                     stream=True,
-                    memory_context_id=payload.get("memory_context_id"),
+                    session_id=payload.get("session_id"),
+                    memory_context_id=payload.get("memory_context_id") or payload.get("session_id"),
                 )
             except Exception as exc:
                 seq = manager.next_sequence(client_id)
@@ -190,29 +151,35 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 )
                 continue
 
-            session_id      = request.memory_context_id or client_id
+            session_id      = request.session_id or request.memory_context_id or client_id
             user_message    = request.last_user_message
-            is_first_turn   = (await message_count(session_id)) == 0
+            is_first_turn   = (await history_service.message_count(session_id, user_id)) == 0
 
             # ── Issue 2: Load full history and merge ──────────────────────
-            history = await get_history(session_id)
+            history = await history_service.get_history(session_id=session_id, user_id=user_id)
             if history:
                 stored = [ChatMessage(role=m["role"], content=m["content"]) for m in history]
-                incoming = {m.content for m in request.messages}
-                deduped  = [m for m in stored if m.content not in incoming]
+                incoming = {m.text_content for m in request.normalized_messages()}
+                deduped  = [m for m in stored if m.text_content not in incoming]
                 request  = request.model_copy(
-                    update={"messages": deduped + list(request.messages)}
+                    update={"messages": deduped + request.normalized_messages()}
                 )
 
-            # ── Issue 3: Inject Mem0 long-term memory as system message ───
-            mem0_context = await _get_mem0_context(user_id, user_message)
-            if mem0_context:
-                mem0_msg = ChatMessage(role="system", content=mem0_context)
+            memory_context = await memory_service.get_memory_context_for_user(user_id=user_id)
+            if memory_context:
+                mem0_msg = ChatMessage(role="system", content=memory_context)
                 request  = request.model_copy(
-                    update={"messages": [mem0_msg] + list(request.messages)}
+                    update={"messages": [mem0_msg] + request.normalized_messages()}
                 )
-                logger.info("Mem0 context injected — user_id=%s, facts=%d chars",
-                            user_id, len(mem0_context))
+                logger.info("Memory context injected — user_id=%s, chars=%d",
+                            user_id, len(memory_context))
+
+            await history_service.save_message(
+                session_id=session_id,
+                user_id=user_id,
+                role="user",
+                content=user_message,
+            )
 
             # ── Status ────────────────────────────────────────────────────
             seq = manager.next_sequence(client_id)
@@ -224,8 +191,9 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
 
             # ── Stream tokens ─────────────────────────────────────────────
             full_response = ""
+            result_container: dict = {}
             try:
-                async for delta in stream_swarm(request):
+                async for delta in stream_swarm(request, result_container=result_container):
                     if delta:
                         full_response += delta
                         seq = manager.next_sequence(client_id)
@@ -264,15 +232,32 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                     logger.info("Title generated — session=%s, title=%s", session_id, title)
 
             # ── Persist turn to short-term history ────────────────────────
-            await append_to_history(session_id, "user", user_message)
             if full_response:
-                await append_to_history(session_id, "assistant", full_response)
+                await history_service.save_message(
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="assistant",
+                    content=full_response,
+                )
 
-            # ── Issue 3: Save turn to Mem0 for long-term memory ───────────
-            await _save_to_mem0(user_id, [
-                {"role": "user",      "content": user_message},
-                {"role": "assistant", "content": full_response},
-            ])
+            usage = get_stream_usage(result_container.get("result"))
+            await record_token_usage(
+                session_id=session_id,
+                prompt_tokens=usage["prompt_tokens"],
+                completion_tokens=usage["completion_tokens"],
+                user_id=user_id,
+            )
+
+            asyncio.create_task(
+                memory_service.extract_memories_background(
+                    messages=[
+                        {"role": "user", "content": user_message},
+                        {"role": "assistant", "content": full_response},
+                    ],
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            )
 
             logger.info("Turn complete — client_id=%s, response_len=%d",
                         client_id, len(full_response))
@@ -283,3 +268,36 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
         logger.exception("WebSocket error — client_id=%s, error=%s", client_id, exc)
     finally:
         manager.disconnect(client_id)
+
+
+def _resolve_websocket_user_id(
+    websocket: WebSocket,
+    token: str | None,
+    api_key: str | None,
+) -> str | None:
+    header_api_key = websocket.headers.get("x-api-key")
+    supplied_api_key = api_key or header_api_key
+    expected_key = SERVICE_API_KEY or get_settings().api_key
+    if expected_key and supplied_api_key != expected_key:
+        return None
+
+    header_user_id = websocket.headers.get("x-user-id")
+    if header_user_id:
+        return header_user_id
+
+    if token:
+        return _verify_token_and_get_user_id(token)
+    return None
+
+
+def _verify_token_and_get_user_id(token: str) -> str | None:
+    jwt_secret = os.getenv("JWT_SECRET")
+    if not jwt_secret:
+        return None
+    try:
+        import jwt  # type: ignore[import-untyped]  # noqa: PLC0415
+        decoded = jwt.decode(token, jwt_secret, algorithms=["HS256"])
+        return decoded.get("id") or decoded.get("sub") or decoded.get("user_id")
+    except Exception as exc:
+        logger.warning("WebSocket JWT verification failed — %s", exc)
+        return None

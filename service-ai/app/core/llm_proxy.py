@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from typing import Any
 
 from agents import set_default_openai_api, set_tracing_disabled
 from openai import AsyncOpenAI
@@ -53,3 +54,27 @@ def get_openai_client() -> AsyncOpenAI:
         api_key=settings.active_api_key,
         base_url=settings.active_base_url,
     )
+
+
+async def chat_completion_with_fallback(**kwargs: Any) -> Any:
+    """
+    Run a Groq chat completion and retry once with the configured fast model.
+    Never falls back to Gemini silently.
+    """
+    settings = get_settings()
+    client = get_openai_client()
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception:
+        fallback_model = settings.fast_model
+        original_model = kwargs.get("model")
+        if not fallback_model or original_model == fallback_model:
+            logger.exception("Groq chat completion failed; no fallback model available.")
+            raise
+        logger.exception(
+            "Groq chat completion failed for model=%s; retrying once with model=%s.",
+            original_model,
+            fallback_model,
+        )
+        retry_kwargs = {**kwargs, "model": fallback_model}
+        return await client.chat.completions.create(**retry_kwargs)

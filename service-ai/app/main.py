@@ -69,9 +69,13 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     if not settings.gemini_api_key:
-        logger.warning(
-            "GEMINI_API_KEY is not configured — chat routes will fail at runtime."
-        )
+        logger.info("Gemini is not configured; Groq remains the active provider.")
+
+    from app.services.history_service import create_indexes as create_history_indexes  # noqa: PLC0415
+    from app.services.memory_service import create_indexes as create_memory_indexes  # noqa: PLC0415
+    await create_history_indexes()
+    await create_memory_indexes()
+    logger.info("MongoDB indexes created on startup.")
 
     # ── Start MCP server subprocesses ────────────────────────────────────
     from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
@@ -121,12 +125,20 @@ def create_app() -> FastAPI:
     # Attach limiter to app state (required by slowapi)
     app.state.limiter = limiter
 
-    # ── CORS (tightened in production via env) ───────────────────────────
+    # ── CORS ─────────────────────────────────────────────────────────────
+    allowed_origins = [
+        origin.strip()
+        for origin in settings.allowed_origins.split(",")
+        if origin.strip()
+    ]
+    if settings.is_production and not allowed_origins:
+        raise RuntimeError("ALLOWED_ORIGINS must be set in production")
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"] if not settings.is_production else [],
+        allow_origins=allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "DELETE", "PATCH"],
         allow_headers=["*"],
     )
 

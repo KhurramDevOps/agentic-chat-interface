@@ -39,9 +39,12 @@ class Settings(BaseSettings):
 
     # ── LLM Provider ─────────────────────────────────────────────────────
     llm_provider: Literal["gemini", "groq"] = Field(
-        default="gemini",
+        default="groq",
         description="Active LLM provider: 'gemini' or 'groq'.",
     )
+    default_provider: str = "groq"
+    default_model: str = "llama-3.3-70b-versatile"
+    fast_model: str = "llama-3.1-8b-instant"
 
     # ── LiteLLM / Gemini ─────────────────────────────────────────────────
     litellm_model: str = Field(
@@ -91,6 +94,10 @@ class Settings(BaseSettings):
         default="",
         description="Master API key for securing chat endpoints. Empty = auth disabled (dev only).",
     )
+    allowed_origins: str = Field(
+        default="http://localhost:5173,http://localhost:3000",
+        description="Comma-separated browser origins allowed by CORS.",
+    )
 
     # ── Constitution safeguard ───────────────────────────────────────────
     @model_validator(mode="before")
@@ -115,13 +122,19 @@ class Settings(BaseSettings):
     @field_validator("gemini_api_key", mode="after")
     @classmethod
     def warn_missing_gemini_key(cls, v: str) -> str:
-        if not v:
+        if False and not v:
             import warnings
             warnings.warn(
                 "GEMINI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq.",
                 stacklevel=2,
             )
         return v
+
+    @model_validator(mode="after")
+    def require_groq_key(self) -> "Settings":
+        if self.llm_provider == "groq" and not self.groq_api_key:
+            raise ValueError("GROQ_API_KEY is required but not set")
+        return self
 
     @property
     def is_production(self) -> bool:

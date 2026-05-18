@@ -24,6 +24,10 @@ const verifyToken = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
 const authLimiter = rateLimit({
@@ -107,14 +111,8 @@ router.post('/login', authLimiter, async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    // Refresh token — 7 days, signed with JWT_REFRESH_SECRET (separate secret)
-    const refreshToken = jwt.sign(
-      { id: user._id.toString() },
-      process.env.JWT_REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    user.refreshToken = refreshToken;
+    const refreshToken = crypto.randomBytes(64).toString('hex');
+    user.refreshToken = sha256(refreshToken);
     await user.save();
 
     return res.status(200).json({ token, refreshToken });
@@ -129,7 +127,7 @@ router.post('/login', authLimiter, async (req, res) => {
 router.get('/me', verifyToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
-      .select('-password -resetToken -resetTokenExpiry -refreshToken');
+      .select('-password -passwordResetToken -passwordResetExpires -refreshToken');
     if (!user) return res.status(404).json({ message: 'User not found.' });
     return res.status(200).json(user);
   } catch (err) {
@@ -159,7 +157,7 @@ router.put('/profile', verifyToken, async (req, res) => {
       req.user.id,
       { $set: updates },
       { new: true }
-    ).select('-password -resetToken -resetTokenExpiry -refreshToken');
+    ).select('-password -passwordResetToken -passwordResetExpires -refreshToken');
 
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
@@ -181,11 +179,9 @@ router.post('/forgot-password', async (req, res) => {
     if (!user) return res.status(404).json({ message: 'No account found with that email.' });
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    user.resetToken = resetToken;
-    user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
+    user.passwordResetToken = sha256(resetToken);
+    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
     await user.save();
-
-    console.log(`[PASSWORD RESET] Token for ${email}: ${resetToken}`);
 
     return res.status(200).json({
       message: 'Password reset token generated. Check your email.',
@@ -204,14 +200,7 @@ router.post('/refresh', async (req, res) => {
     const { refreshToken } = req.body;
     if (!refreshToken) return res.status(401).json({ message: 'Refresh token is required.' });
 
-    let decoded;
-    try {
-      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-    } catch {
-      return res.status(401).json({ message: 'Invalid or expired refresh token.' });
-    }
-
-    const user = await User.findOne({ _id: decoded.id, refreshToken });
+    const user = await User.findOne({ refreshToken: sha256(refreshToken) }).select('+refreshToken');
     if (!user) return res.status(401).json({ message: 'Refresh token not recognised.' });
 
     const newAccessToken = jwt.sign(
@@ -237,15 +226,15 @@ router.post('/reset-password', async (req, res) => {
     }
 
     const user = await User.findOne({
-      resetToken,
-      resetTokenExpiry: { $gt: new Date() },
-    });
+      passwordResetToken: sha256(resetToken),
+      passwordResetExpires: { $gt: new Date() },
+    }).select('+passwordResetToken');
     if (!user) return res.status(400).json({ message: 'Invalid or expired reset token.' });
 
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
-    user.resetToken = null;
-    user.resetTokenExpiry = null;
+    user.passwordResetToken = null;
+    user.passwordResetExpires = null;
     await user.save();
 
     return res.status(200).json({ message: 'Password reset successfully.' });
