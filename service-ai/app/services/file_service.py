@@ -108,8 +108,21 @@ class DocumentStore:
             return _fallback[doc_id]
         try:
             import asyncio  # noqa: PLC0415
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self.get_document(doc_id))
+            from app.workers.media_worker import _main_loop  # noqa: PLC0415
+
+            loop = _main_loop
+            if loop is None or not loop.is_running():
+                loop = asyncio.get_event_loop()
+
+            if loop.is_running():
+                # Called from a thread executor while the main loop is running —
+                # run_until_complete would deadlock; use run_coroutine_threadsafe instead.
+                future = asyncio.run_coroutine_threadsafe(
+                    self.get_document(doc_id), loop
+                )
+                return future.result(timeout=5.0)
+            else:
+                return loop.run_until_complete(self.get_document(doc_id))
         except Exception as exc:
             logger.warning(
                 "FileService: sync get failed — doc_id=%s, error=%s", doc_id, exc

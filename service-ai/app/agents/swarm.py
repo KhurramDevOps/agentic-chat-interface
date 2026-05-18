@@ -11,10 +11,12 @@ Constitution compliance:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
+from fastapi import HTTPException, status
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.agents.triage_agent import build_triage_agent
@@ -189,7 +191,20 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         "request_id": request.request_id,
     }
 
-    result: RunResult = await _run_with_retry(triage, input_messages, context_variables)
+    try:
+        result: RunResult = await asyncio.wait_for(
+            _run_with_retry(triage, input_messages, context_variables),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("run_swarm timed out — request_id=%s", request.request_id)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={"error": {"code": "LLM_TIMEOUT",
+                               "message": "The AI service did not respond in time. Please try again.",
+                               "request_id": request.request_id}},
+        )
+
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
@@ -294,22 +309,32 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         run_config=run_config,
     )
 
-    async for event in result.stream_events():
-        if not isinstance(event, RawResponsesStreamEvent):
-            continue
+    try:
+        async with asyncio.timeout(30.0):
+            async for event in result.stream_events():
+                if not isinstance(event, RawResponsesStreamEvent):
+                    continue
 
-        data = event.data
-        delta_content: str | None = None
+                data = event.data
+                delta_content: str | None = None
 
-        if hasattr(data, "choices") and data.choices:
-            delta = data.choices[0].delta
-            if delta and delta.content:
-                delta_content = delta.content
-        elif hasattr(data, "type") and data.type == "response.output_text.delta":
-            delta_content = getattr(data, "delta", None)
+                if hasattr(data, "choices") and data.choices:
+                    delta = data.choices[0].delta
+                    if delta and delta.content:
+                        delta_content = delta.content
+                elif hasattr(data, "type") and data.type == "response.output_text.delta":
+                    delta_content = getattr(data, "delta", None)
 
-        if delta_content:
-            yield delta_content
+                if delta_content:
+                    yield delta_content
+    except asyncio.TimeoutError:
+        logger.error("stream_swarm timed out — request_id=%s", request.request_id)
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={"error": {"code": "LLM_TIMEOUT",
+                               "message": "The AI service did not respond in time.",
+                               "request_id": request.request_id}},
+        )
 
     # Store result so caller can read exact token usage after stream completes
     _last_stream_result = result

@@ -3,3 +3,9 @@ node_modules/
 .venv/
 __pycache__/
 .DS_Store
+
+# Screenshots and design assets
+*.png
+*.jpg
+*.jpeg
+*.zip
