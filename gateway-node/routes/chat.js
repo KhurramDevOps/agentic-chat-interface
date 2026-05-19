@@ -34,7 +34,13 @@ function userIdFromReq(req) {
 }
 
 function pythonBaseUrl() {
-  return (process.env.PYTHON_API_URL || process.env.PYTHON_AI_URL || PYTHON_API_URL).replace(/\/$/, '');
+  return (process.env.PYTHON_API_URL || process.env.PYTHON_AI_URL || PYTHON_API_URL)
+    .replace(/\/+$/, '')
+    .replace(/\/api\/v1\/chat\/completions$/, '')
+    .replace(/\/api\/v1\/chat\/stream$/, '')
+    .replace(/\/api\/v1$/, '')
+    .replace(/\/chat$/, '')
+    .replace(/\/stream$/, '');
 }
 
 function pythonStreamUrl() {
@@ -541,6 +547,17 @@ async function chatHandler(req, res) {
     const currentMemory = normalizeMemory(user);
     memoryUsed = memoryHasContent(currentMemory);
     const searchEnabled = webSearch || currentMemory.webSearchEnabled === true;
+
+    res.write(`data: ${JSON.stringify({
+      type: 'meta',
+      sessionId: session._id.toString(),
+      title: session.title,
+      memoryUsed,
+      memory: currentMemory,
+      searchUsed: false,
+      sources: [],
+    })}\n\n`);
+
     const pythonRes = await fetch(`${pythonBaseUrl()}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -557,8 +574,8 @@ async function chatHandler(req, res) {
     });
 
     if (!pythonRes.ok || !pythonRes.body) {
-      res.write('data: [ERROR] AI service unavailable\n\n');
-      res.write('data: [DONE]\n\n');
+      res.write(`data: ${JSON.stringify({ type: 'error', text: 'AI service unavailable' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
       res.end();
       return;
     }
@@ -658,8 +675,8 @@ async function chatHandler(req, res) {
         console.error('Failed to save partial assistant response:', saveErr.message);
       }
     }
-    res.write('data: [ERROR] AI service unavailable\n\n');
-    res.write('data: [DONE]\n\n');
+    res.write(`data: ${JSON.stringify({ type: 'error', text: 'AI service unavailable' })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     res.end();
   }
 }
