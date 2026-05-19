@@ -1,23 +1,13 @@
-import apiClient from './apiClient';
+import api from './axios';
 
-/**
- * authApi.js
- * ───────────
- * Auth REST calls through the pre-configured Axios instance.
- * Token attachment and refresh are handled by apiClient interceptors.
- */
+export const loginApi = (credentials) =>
+  api.post('/auth/login', credentials).then((response) => response.data);
 
-export const login = (email, password) =>
-  apiClient.post('/api/auth/login', { email, password });
+export const registerApi = (userData) =>
+  api.post('/auth/register', userData).then((response) => response.data);
 
-export const signup = (name, email, password) =>
-  apiClient.post('/api/auth/signup', { name, email, password });
+export const logoutApi = () =>
+  api.post('/auth/logout').then((response) => response.data);
 
-export const logout = () =>
-  apiClient.post('/api/auth/logout');
-
-export const fetchMe = () =>
-  apiClient.get('/api/auth/me');
-
-export const refresh = (refreshToken) =>
-  apiClient.post('/api/auth/refresh', { refreshToken });
+export const refreshTokenApi = () =>
+  api.post('/auth/refresh').then((response) => response.data);
