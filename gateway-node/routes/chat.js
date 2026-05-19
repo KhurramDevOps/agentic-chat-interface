@@ -17,6 +17,7 @@ const router = express.Router();
 const PROXY_TIMEOUT_MS = 30000;
 const MAX_CONTEXT_MESSAGES = 24;
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://localhost:8000';
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const TEXT_TYPES = new Set(['text/plain', 'text/markdown', 'application/json']);
 const upload = multer({
@@ -30,6 +31,15 @@ const upload = multer({
 
 function userIdFromReq(req) {
   return String(req.user.userId || req.user.id);
+}
+
+function pythonBaseUrl() {
+  return (process.env.PYTHON_API_URL || process.env.PYTHON_AI_URL || PYTHON_API_URL).replace(/\/$/, '');
+}
+
+function pythonStreamUrl() {
+  return process.env.PYTHON_STREAM_URL ||
+    `${pythonBaseUrl().replace(/\/chat\/completions$/, '')}/stream`;
 }
 
 function sessionTitleFromMessage(message) {
@@ -333,8 +343,7 @@ async function extractAndSaveMemory({ user, userMessage, assistantReply, current
   }
 
   try {
-    const pythonBase = process.env.PYTHON_API_URL || process.env.PYTHON_AI_URL || 'http://localhost:8000';
-    const response = await fetch(`${pythonBase.replace(/\/$/, '')}/memory/extract`, {
+    const response = await fetch(`${pythonBaseUrl()}/memory/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -532,8 +541,7 @@ async function chatHandler(req, res) {
     const currentMemory = normalizeMemory(user);
     memoryUsed = memoryHasContent(currentMemory);
     const searchEnabled = webSearch || currentMemory.webSearchEnabled === true;
-    const pythonBase = process.env.PYTHON_API_URL || process.env.PYTHON_AI_URL || 'http://localhost:8000';
-    const pythonRes = await fetch(`${pythonBase.replace(/\/$/, '')}/chat`, {
+    const pythonRes = await fetch(`${pythonBaseUrl()}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -663,7 +671,7 @@ router.post('/message', verifyToken, upload.array('images', 3), chatHandler);
 
 router.post('/legacy', verifyToken, async (req, res) => {
   try {
-    const pythonUrl = process.env.PYTHON_API_URL;
+    const pythonUrl = pythonBaseUrl();
     const apiKey = process.env.PYTHON_API_KEY;
 
     const body = {
@@ -694,8 +702,6 @@ router.post('/legacy', verifyToken, async (req, res) => {
 
 router.post('/stream', verifyToken, async (req, res) => {
   try {
-    const pythonStreamUrl = process.env.PYTHON_STREAM_URL ||
-      (process.env.PYTHON_API_URL || '').replace('/completions', '/stream');
     const apiKey = process.env.PYTHON_API_KEY;
 
     const body = {
@@ -703,7 +709,7 @@ router.post('/stream', verifyToken, async (req, res) => {
       ...req.body,
     };
 
-    const upstream = await axios.post(pythonStreamUrl, body, {
+    const upstream = await axios.post(pythonStreamUrl(), body, {
       headers: {
         'Content-Type': 'application/json',
         'X-User-ID': req.user.id,

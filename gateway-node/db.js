@@ -8,9 +8,17 @@
 const mongoose = require('mongoose');
 
 const connectDB = async () => {
-  const uri = process.env.MONGO_URI || 'mongodb://localhost:27017/gateway';
-  await mongoose.connect(uri);
-  console.log('MongoDB connected:', uri.split('@').pop());
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+  if (!uri) {
+    throw new Error('MONGODB_URI is required for the Node gateway.');
+  }
+
+  await mongoose.connect(uri, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  });
+  console.log('MongoDB connected successfully');
 };
 
 module.exports = connectDB;

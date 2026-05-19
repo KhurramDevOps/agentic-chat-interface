@@ -25,6 +25,10 @@ const verifyToken = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
+function refreshJwtSecret() {
+  return process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+}
+
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
 const authLimiter = rateLimit({
@@ -166,7 +170,7 @@ router.post('/login', authLimiter, async (req, res) => {
     // Refresh token — 7 days, signed with JWT_REFRESH_SECRET (separate secret)
     const refreshToken = jwt.sign(
       { id: user._id.toString() },
-      process.env.JWT_REFRESH_SECRET,
+      refreshJwtSecret(),
       { expiresIn: '7d' }
     );
 
@@ -272,7 +276,7 @@ router.post('/refresh', async (req, res) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+      decoded = jwt.verify(refreshToken, refreshJwtSecret());
     } catch {
       return res.status(401).json({ message: 'Invalid or expired refresh token.' });
     }
