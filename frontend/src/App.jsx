@@ -1,18 +1,40 @@
 import React from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import './App.css';
-import LoadingSpinner from './components/ui/LoadingSpinner';
-import { useAuth } from './hooks/useAuth';
-import AuthPage from './pages/AuthPage';
-import ChatPage from './pages/ChatPage';
+import ProtectedRoute from './components/shared/ProtectedRoute';
+import LandingPage from './pages/LandingPage';
+import Register from './pages/Auth/Register';
+import SignIn from './pages/Auth/SignIn';
+import ChatPage from './pages/Chat/ChatPage';
+import Onboarding from './pages/Onboarding';
 
 function App() {
-  const { isAuthenticated, isLoading } = useAuth();
-
-  if (isLoading) {
-    return <LoadingSpinner fullscreen />;
-  }
-
-  return isAuthenticated ? <ChatPage /> : <AuthPage />;
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/auth/signin" element={<SignIn />} />
+        <Route path="/auth/register" element={<Register />} />
+        <Route
+          path="/onboarding"
+          element={
+            <ProtectedRoute>
+              <Onboarding />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/chat"
+          element={
+            <ProtectedRoute>
+              <ChatPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
 export default App;

@@ -30,7 +30,7 @@
                            │  HTTPS / WSS
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Node.js API Gateway  (:3001)                    │
+│              Node.js API Gateway  (:5001)                    │
 │                                                             │
 │  POST /api/auth/login          JWT (1h) + refreshToken (7d) │
 │  POST /api/auth/signup         User registration            │
@@ -281,7 +281,7 @@ All requests go through `api/apiClient.js` — a configured Axios instance with 
 ```js
 // api/apiClient.js
 const apiClient = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5001',
+  baseURL: '/api',
   timeout: 30000,
 });
 ```
@@ -416,7 +416,7 @@ Connection: wss://<gateway>/api/v1/stream/ws/{client_id}
 ### Phase 1A — Foundation & Auth (Week 1)
 
 - [ ] **1.** Confirm CRA project runs (`npm start`). Verify Bootstrap, react-bootstrap, react-router-dom, zustand, axios are installed.
-- [ ] **2.** Create `src/api/apiClient.js` — Axios instance with `baseURL` from `REACT_APP_API_URL`. Add request interceptor to attach `Authorization: Bearer <token>` from `authStore`. Add response interceptor to handle 401 → call `refreshAccessToken()` → retry.
+- [ ] **2.** Create `src/api/axios.js` — Axios instance with `baseURL: '/api'`. Add request interceptor to attach `Authorization: Bearer <token>`.
 - [ ] **3.** Create `src/api/authApi.js` — export `login()`, `signup()`, `logout()`, `fetchMe()`, `refresh()` functions that call `apiClient`.
 - [ ] **4.** Create `src/store/authStore.js` — Zustand store with shape defined in Section 4.1. Implement `login`, `signup`, `logout`, `refreshAccessToken`, `fetchMe` actions. Store `refreshToken` in `localStorage` on login; clear on logout.
 - [ ] **5.** Create `src/hooks/useAuth.js` — thin selector hook over `authStore`.
@@ -450,8 +450,8 @@ Connection: wss://<gateway>/api/v1/stream/ws/{client_id}
 - [ ] **23.** Add `src/utils/tokenUtils.js` — `decodeToken(token)` and `isTokenExpired(token)` using `atob` on the JWT payload. Used by the Axios interceptor to proactively refresh before expiry rather than waiting for a 401.
 - [ ] **24.** Handle WebSocket reconnection — in `useWebSocket`, implement exponential backoff reconnect (max 5 attempts) when the socket closes unexpectedly.
 - [ ] **25.** Add `src/styles/` CSS files for each component. Ensure all dark-theme colours, input focus states, bubble alignment, and sidebar styles are defined in external CSS only.
-- [ ] **26.** Create `.env` file: `REACT_APP_API_URL=http://localhost:5001`. Create `.env.production` with the deployed gateway URL.
-- [ ] **27.** Add `REACT_APP_API_URL` to `.gitignore` exclusions if it contains secrets. Commit `.env.example` with placeholder values.
+- [ ] **26.** Create `.env` file with `PORT=3000`. Use CRA `proxy` in `package.json` for local `/api` routing to the gateway.
+- [ ] **27.** Commit `.env.example` with placeholder values.
 - [ ] **28.** Run `npm run build`. Verify the production bundle has no console errors. Test the full flow: register → login → send message → receive streamed response → refresh page → session persists.
 
 ---
@@ -460,8 +460,6 @@ Connection: wss://<gateway>/api/v1/stream/ws/{client_id}
 
 ```bash
 # .env
-REACT_APP_API_URL=http://localhost:5001
-REACT_APP_WS_URL=ws://localhost:5001
 PORT=3000
 ```
 
