@@ -330,10 +330,12 @@ def create_app() -> FastAPI:
             "mem0 local memory, multi-agent swarm, async media jobs."
         ),
         version="0.1.0",
-        docs_url="/docs" if not settings.is_production else None,
-        redoc_url="/redoc" if not settings.is_production else None,
         lifespan=lifespan,
     )
+
+    @app.get("/health")
+    async def health_check():
+        return {"status": "ok", "service": "nexus-python"}
 
     # ── Exception handlers ───────────────────────────────────────────────
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
@@ -357,10 +359,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.get("/health")
-    async def health_check():
-        return {"status": "ok", "service": "nexus-python"}
 
     @app.post("/chat")
     async def chat(body: dict):
