@@ -1,13 +1,13 @@
 /**
  * routes/proxy.js
  * ────────────────
- * HTTP proxy routes for history and usage endpoints.
+ * Proxy routes for history and usage endpoints.
  *
- * GET    /api/history/:sessionId  → Python /api/v1/chat/history/:sessionId
- * DELETE /api/history/:sessionId  → Python /api/v1/chat/history/:sessionId
- * GET    /api/usage               → Python /api/v1/users/usage
+ * GET    /history/:sessionId  — fetch conversation history from Python service
+ * DELETE /history/:sessionId  — clear conversation history
+ * GET    /usage               — fetch token usage for the authenticated user
  *
- * All routes require a valid JWT and inject X-User-ID + X-API-Key upstream.
+ * All routes inject X-User-ID, X-API-Key, and X-Request-ID into upstream headers.
  */
 
 const express = require('express');
@@ -19,40 +19,32 @@ const router = express.Router();
 
 const PROXY_TIMEOUT_MS = 30000;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Shared header builder ─────────────────────────────────────────────────────
 
 function buildHeaders(req) {
   return {
     'Content-Type': 'application/json',
     'X-User-ID': req.user.id,
-    'X-User-Email': req.user.email || '',
-    'X-API-Key': process.env.PYTHON_API_KEY || '',
+    'X-API-Key': process.env.PYTHON_API_KEY,
     'X-Request-ID': req.headers['x-request-id'] || crypto.randomUUID(),
   };
 }
 
-/**
- * Returns the Python service base URL.
- * Strips any trailing path so we can append clean routes.
- * e.g. "http://127.0.0.1:8000/api/v1/chat/completions" → "http://127.0.0.1:8000"
- */
-function pythonOrigin() {
-  const base = process.env.PYTHON_BASE_URL || 'http://127.0.0.1:8000';
-  // Strip everything after the host:port
-  try {
-    const u = new URL(base);
-    return `${u.protocol}//${u.host}`;
-  } catch {
-    return base.replace(/\/api.*$/, '');
-  }
+function pythonBase() {
+  return (
+    process.env.PYTHON_BASE_URL ||
+    (process.env.PYTHON_API_URL || 'http://localhost:8000/api/v1').replace(
+      /\/chat\/completions$/,
+      ''
+    )
+  );
 }
 
 // ── GET /history/:sessionId ───────────────────────────────────────────────────
 
 router.get('/history/:sessionId', verifyToken, async (req, res) => {
   try {
-    // Python endpoint: GET /api/v1/chat/history/:sessionId
-    const url = `${pythonOrigin()}/api/v1/chat/history/${req.params.sessionId}`;
+    const url = `${pythonBase()}/chat/history/${req.params.sessionId}`;
     const response = await axios.get(url, {
       headers: buildHeaders(req),
       timeout: PROXY_TIMEOUT_MS,
@@ -62,7 +54,6 @@ router.get('/history/:sessionId', verifyToken, async (req, res) => {
     if (err.response) {
       return res.status(err.response.status).json(err.response.data);
     }
-    console.error('[proxy] GET history error:', err.message);
     return res.status(502).json({ message: 'Python service unavailable.', error: err.message });
   }
 });
@@ -71,7 +62,7 @@ router.get('/history/:sessionId', verifyToken, async (req, res) => {
 
 router.delete('/history/:sessionId', verifyToken, async (req, res) => {
   try {
-    const url = `${pythonOrigin()}/api/v1/chat/history/${req.params.sessionId}`;
+    const url = `${pythonBase()}/chat/history/${req.params.sessionId}`;
     const response = await axios.delete(url, {
       headers: buildHeaders(req),
       timeout: PROXY_TIMEOUT_MS,
@@ -81,7 +72,6 @@ router.delete('/history/:sessionId', verifyToken, async (req, res) => {
     if (err.response) {
       return res.status(err.response.status).json(err.response.data);
     }
-    console.error('[proxy] DELETE history error:', err.message);
     return res.status(502).json({ message: 'Python service unavailable.', error: err.message });
   }
 });
@@ -90,7 +80,7 @@ router.delete('/history/:sessionId', verifyToken, async (req, res) => {
 
 router.get('/usage', verifyToken, async (req, res) => {
   try {
-    const url = `${pythonOrigin()}/api/v1/users/usage`;
+    const url = `${pythonBase()}/users/${req.user.id}/usage`;
     const response = await axios.get(url, {
       headers: buildHeaders(req),
       timeout: PROXY_TIMEOUT_MS,
@@ -100,7 +90,6 @@ router.get('/usage', verifyToken, async (req, res) => {
     if (err.response) {
       return res.status(err.response.status).json(err.response.data);
     }
-    console.error('[proxy] GET usage error:', err.message);
     return res.status(502).json({ message: 'Python service unavailable.', error: err.message });
   }
 });

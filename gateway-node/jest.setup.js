@@ -1,6 +1,4 @@
 // Set default environment variables for all test suites
-jest.setTimeout(30000);
-
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-default';
 process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'test-jwt-refresh-secret-default';
 process.env.PYTHON_API_KEY = process.env.PYTHON_API_KEY || 'test-python-api-key';
