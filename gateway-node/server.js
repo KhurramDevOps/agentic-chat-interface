@@ -30,7 +30,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -57,7 +57,11 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', service: 'nexus-node-gateway' });
+  res.status(200).json({
+    status: 'ok',
+    service: 'nexus-node-gateway',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────

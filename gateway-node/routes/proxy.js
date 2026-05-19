@@ -18,6 +18,7 @@ const verifyToken = require('../middleware/authMiddleware');
 const router = express.Router();
 
 const PROXY_TIMEOUT_MS = 30000;
+const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://localhost:8000';
 
 // ── Shared header builder ─────────────────────────────────────────────────────
 
@@ -31,13 +32,9 @@ function buildHeaders(req) {
 }
 
 function pythonBase() {
-  return (
-    process.env.PYTHON_BASE_URL ||
-    (process.env.PYTHON_API_URL || 'http://localhost:8000/api/v1').replace(
-      /\/chat\/completions$/,
-      ''
-    )
-  );
+  return (process.env.PYTHON_API_URL || PYTHON_API_URL)
+    .replace(/\/$/, '')
+    .replace(/\/chat\/completions$/, '');
 }
 
 // ── GET /history/:sessionId ───────────────────────────────────────────────────
