@@ -296,19 +296,34 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     if settings.llm_provider == "gemini" and not settings.gemini_api_key:
         logger.warning("GEMINI_API_KEY is not configured — Gemini routes will fail at runtime.")
 
-    # ── Start MCP server subprocesses ────────────────────────────────────
-    from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
-    mcp_manager = get_mcp_manager()
-    await mcp_manager.start()
-
-    # ── Pre-build the agent swarm (injects MCP servers) ──────────────────
-    from app.agents.swarm import initialise_swarm  # noqa: PLC0415
-    await initialise_swarm()
-
     # ── Register main event loop for media worker thread scheduling ───────
-    import asyncio  # noqa: PLC0415
     from app.workers.media_worker import set_main_event_loop  # noqa: PLC0415
     set_main_event_loop(asyncio.get_running_loop())
+
+    # ── Optional agent swarm preload ─────────────────────────────────────
+    # Render must see an open port quickly. The public /chat endpoint uses
+    # direct Groq streaming and does not require MCP/swarm startup, so keep
+    # this expensive preload opt-in and bounded.
+    mcp_manager = None
+    enable_swarm_startup = os.getenv("ENABLE_AGENT_SWARM_STARTUP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if enable_swarm_startup:
+        try:
+            from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
+            from app.agents.swarm import initialise_swarm  # noqa: PLC0415
+
+            mcp_manager = get_mcp_manager()
+            await asyncio.wait_for(mcp_manager.start(), timeout=15)
+            await asyncio.wait_for(initialise_swarm(), timeout=15)
+            logger.info("Agent swarm preload complete.")
+        except Exception as exc:
+            logger.warning("Agent swarm preload skipped after startup failure: %s", exc)
+            mcp_manager = None
+    else:
+        logger.info("Agent swarm preload skipped. Set ENABLE_AGENT_SWARM_STARTUP=true to enable it.")
 
     logger.info("service-ai startup complete.")
 
@@ -316,7 +331,8 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("service-ai shutting down.")
-    await mcp_manager.shutdown()
+    if mcp_manager is not None:
+        await mcp_manager.shutdown()
 
 
 def create_app() -> FastAPI:
