@@ -233,7 +233,10 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     )
 
 
-async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
+async def stream_swarm(
+    request: ChatRequest,
+    result_container: dict | None = None,
+) -> AsyncIterator[str]:
     """
     Execute a ChatRequest through the TriageAgent swarm in streaming mode.
 
@@ -241,13 +244,14 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Tool calls and handoffs are handled internally — only final text
     tokens are yielded to the caller.
 
-    After the iterator is exhausted, the caller can read exact token usage
-    from the `_last_stream_result` module variable via get_last_stream_usage().
+    After the iterator is exhausted, callers can read exact token usage from
+    the request-scoped result_container passed into this function.
 
     Usage:
-        async for delta in stream_swarm(request):
+        result_container = {}
+        async for delta in stream_swarm(request, result_container=result_container):
             await websocket.send_text(delta)
-        usage = get_last_stream_usage()
+        usage = get_stream_usage(result_container.get("result"))
 
     Args:
         request: Validated ChatRequest with full history merged in.
@@ -255,7 +259,6 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     Yields:
         str — incremental text chunks from the LLM.
     """
-    global _last_stream_result
     from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
 
     triage = get_swarm()
@@ -311,8 +314,9 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
         if delta_content:
             yield delta_content
 
-    # Store result so caller can read exact token usage after stream completes
-    _last_stream_result = result
+    if result_container is not None:
+        result_container["result"] = result
+        result_container["usage"] = get_stream_usage(result)
 
     logger.info(
         "stream_swarm complete — request_id=%s, last_agent=%s",
@@ -321,18 +325,11 @@ async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     )
 
 
-# Module-level storage for the most recent stream result (per-process, not per-request).
-# Safe for single-worker deployments; for multi-worker use a request-scoped store.
-_last_stream_result = None
-
-
-def get_last_stream_usage() -> dict[str, int]:
+def get_stream_usage(result) -> dict[str, int]:
     """
-    Return exact token usage from the most recently completed stream_swarm call.
-    Must be called immediately after the stream is exhausted.
+    Return exact token usage from a completed Runner streamed result.
     Returns zeros if no result is available.
     """
-    result = _last_stream_result
     if result is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -349,6 +346,16 @@ def get_last_stream_usage() -> dict[str, int]:
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     }
+
+
+def get_last_stream_usage() -> dict[str, int]:
+    """
+    Backwards-compatible usage helper.
+
+    Streaming usage is request-scoped now; callers should pass a result_container
+    into stream_swarm() and call get_stream_usage(result_container["result"]).
+    """
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _extract_handoff_chain(result: RunResult) -> list[str]:
