@@ -42,9 +42,6 @@ class Settings(BaseSettings):
         default="groq",
         description="Active LLM provider: 'gemini' or 'groq'.",
     )
-    default_provider: str = "groq"
-    default_model: str = "llama-3.3-70b-versatile"
-    fast_model: str = "llama-3.1-8b-instant"
 
     # ── LiteLLM / Gemini ─────────────────────────────────────────────────
     litellm_model: str = Field(
@@ -94,10 +91,6 @@ class Settings(BaseSettings):
         default="",
         description="Master API key for securing chat endpoints. Empty = auth disabled (dev only).",
     )
-    allowed_origins: str = Field(
-        default="http://localhost:3000",
-        description="Comma-separated browser origins allowed by CORS.",
-    )
 
     # ── Constitution safeguard ───────────────────────────────────────────
     @model_validator(mode="before")
@@ -119,21 +112,20 @@ class Settings(BaseSettings):
             )
         return values
 
-    @field_validator("gemini_api_key", mode="after")
-    @classmethod
-    def warn_missing_gemini_key(cls, v: str) -> str:
-        if False and not v:
-            import warnings
+    @model_validator(mode="after")
+    def warn_missing_active_provider_key(self) -> "Settings":
+        import warnings
+
+        if self.llm_provider == "groq" and not self.groq_api_key:
             warnings.warn(
-                "GEMINI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq.",
+                "GROQ_API_KEY is not set. Groq chat requests will fail until it is configured.",
                 stacklevel=2,
             )
-        return v
-
-    @model_validator(mode="after")
-    def require_groq_key(self) -> "Settings":
-        if self.llm_provider == "groq" and not self.groq_api_key:
-            raise ValueError("GROQ_API_KEY is required but not set")
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            warnings.warn(
+                "GEMINI_API_KEY is not set. Gemini chat requests will fail until it is configured.",
+                stacklevel=2,
+            )
         return self
 
     @property

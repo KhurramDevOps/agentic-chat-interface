@@ -11,12 +11,10 @@ Constitution compliance:
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from agents import Agent, Runner, RunResult, set_default_openai_client
-from fastapi import HTTPException, status
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.agents.triage_agent import build_triage_agent
@@ -83,10 +81,10 @@ async def initialise_swarm() -> Agent:
     if _triage_agent is not None:
         return _triage_agent
 
-    # Wire the active OpenAI-compatible client
+    # Wire the configured OpenAI-compatible client (Groq by default).
     client = get_openai_client()
     set_default_openai_client(client)
-    logger.info("Swarm client wired to active OpenAI-compatible endpoint.")
+    logger.info("Swarm client wired to configured OpenAI-compatible endpoint.")
 
     # Fetch MCP servers for the ResearchAgent
     from app.services.mcp_service import get_mcp_manager  # noqa: PLC0415
@@ -165,7 +163,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
 
     history_msgs = [
         {"role": msg.role, "content": msg.content}
-        for msg in request.normalized_messages()
+        for msg in request.messages
     ]
 
     input_messages = [system_msg] + history_msgs
@@ -180,7 +178,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         request.request_id,
         len(user_input),
         context_id,
-        len(request.normalized_messages()),
+        len(request.messages),
     )
 
     # context_variables are injected into tool functions via context_variables: dict param
@@ -191,20 +189,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
         "request_id": request.request_id,
     }
 
-    try:
-        result: RunResult = await asyncio.wait_for(
-            _run_with_retry(triage, input_messages, context_variables),
-            timeout=30.0,
-        )
-    except asyncio.TimeoutError:
-        logger.error("run_swarm timed out — request_id=%s", request.request_id)
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={"error": {"code": "LLM_TIMEOUT",
-                               "message": "The AI service did not respond in time. Please try again.",
-                               "request_id": request.request_id}},
-        )
-
+    result: RunResult = await _run_with_retry(triage, input_messages, context_variables)
     final_output = result.final_output
     if not isinstance(final_output, str):
         final_output = str(final_output) if final_output is not None else ""
@@ -239,7 +224,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
             handoff_chain=handoff_chain,
             turns_used=result._current_turn,
         ),
-        model=request.model or _cfg().active_model,
+        model=request.model,
         usage={
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -248,10 +233,7 @@ async def run_swarm(request: ChatRequest) -> AgentResponse:
     )
 
 
-async def stream_swarm(
-    request: ChatRequest,
-    result_container: dict | None = None,
-) -> AsyncIterator[str]:
+async def stream_swarm(request: ChatRequest) -> AsyncIterator[str]:
     """
     Execute a ChatRequest through the TriageAgent swarm in streaming mode.
 
@@ -260,12 +242,12 @@ async def stream_swarm(
     tokens are yielded to the caller.
 
     After the iterator is exhausted, the caller can read exact token usage
-    from the caller-owned result_container.
+    from the `_last_stream_result` module variable via get_last_stream_usage().
 
     Usage:
         async for delta in stream_swarm(request):
             await websocket.send_text(delta)
-        usage = get_stream_usage(result_container.get("result"))
+        usage = get_last_stream_usage()
 
     Args:
         request: Validated ChatRequest with full history merged in.
@@ -273,6 +255,7 @@ async def stream_swarm(
     Yields:
         str — incremental text chunks from the LLM.
     """
+    global _last_stream_result
     from agents import RawResponsesStreamEvent, RunConfig, ModelSettings  # noqa: PLC0415
 
     triage = get_swarm()
@@ -282,12 +265,12 @@ async def stream_swarm(
         "role": "system",
         "content": f"session_id: {context_id}",
     }
-    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.normalized_messages()]
+    history_msgs = [{"role": msg.role, "content": msg.content} for msg in request.messages]
     input_messages = [system_msg] + history_msgs
 
     logger.info(
         "stream_swarm — request_id=%s, context_id=%s, history_turns=%d",
-        request.request_id, context_id, len(request.normalized_messages()),
+        request.request_id, context_id, len(request.messages),
     )
 
     context_variables = {
@@ -311,36 +294,25 @@ async def stream_swarm(
         run_config=run_config,
     )
 
-    try:
-        async with asyncio.timeout(30.0):
-            async for event in result.stream_events():
-                if not isinstance(event, RawResponsesStreamEvent):
-                    continue
+    async for event in result.stream_events():
+        if not isinstance(event, RawResponsesStreamEvent):
+            continue
 
-                data = event.data
-                delta_content: str | None = None
+        data = event.data
+        delta_content: str | None = None
 
-                if hasattr(data, "choices") and data.choices:
-                    delta = data.choices[0].delta
-                    if delta and delta.content:
-                        delta_content = delta.content
-                elif hasattr(data, "type") and data.type == "response.output_text.delta":
-                    delta_content = getattr(data, "delta", None)
+        if hasattr(data, "choices") and data.choices:
+            delta = data.choices[0].delta
+            if delta and delta.content:
+                delta_content = delta.content
+        elif hasattr(data, "type") and data.type == "response.output_text.delta":
+            delta_content = getattr(data, "delta", None)
 
-                if delta_content:
-                    yield delta_content
-    except asyncio.TimeoutError:
-        logger.error("stream_swarm timed out — request_id=%s", request.request_id)
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={"error": {"code": "LLM_TIMEOUT",
-                               "message": "The AI service did not respond in time.",
-                               "request_id": request.request_id}},
-        )
+        if delta_content:
+            yield delta_content
 
-    if result_container is not None:
-        result_container["result"] = result
-        result_container["usage"] = get_stream_usage(result)
+    # Store result so caller can read exact token usage after stream completes
+    _last_stream_result = result
 
     logger.info(
         "stream_swarm complete — request_id=%s, last_agent=%s",
@@ -348,11 +320,19 @@ async def stream_swarm(
         result.last_agent.name if result.last_agent else "unknown",
     )
 
-def get_stream_usage(result) -> dict[str, int]:
+
+# Module-level storage for the most recent stream result (per-process, not per-request).
+# Safe for single-worker deployments; for multi-worker use a request-scoped store.
+_last_stream_result = None
+
+
+def get_last_stream_usage() -> dict[str, int]:
     """
-    Return exact token usage from one request-scoped streaming result.
+    Return exact token usage from the most recently completed stream_swarm call.
+    Must be called immediately after the stream is exhausted.
     Returns zeros if no result is available.
     """
+    result = _last_stream_result
     if result is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
