@@ -11,8 +11,6 @@ const request = require('supertest');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 
-jest.mock('../db', () => jest.fn().mockResolvedValue(true));
-
 // Use a fixed secret for all tests — matches what the middleware reads from env
 const TEST_SECRET = 'test-jwt-secret-for-middleware-specs';
 

@@ -24,19 +24,79 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Password is required'],
     },
-    passwordResetToken: {
+    resetToken: {
       type: String,
       default: null,
-      select: false,
     },
-    passwordResetExpires: {
+    resetTokenExpiry: {
       type: Date,
       default: null,
     },
     refreshToken: {
       type: String,
       default: null,
-      select: false,
+    },
+    memory: {
+      name: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      nickname: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      occupation: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      location: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      facts: {
+        type: [String],
+        default: [],
+      },
+      lastUpdated: {
+        type: Date,
+        default: null,
+      },
+    },
+    onboarding: {
+      completed: {
+        type: Boolean,
+        default: false,
+      },
+      interests: {
+        type: [String],
+        default: [],
+      },
+      responseStyle: {
+        type: String,
+        enum: ['concise', 'detailed', 'casual', 'formal', ''],
+        default: '',
+      },
+      memoryEnabled: {
+        type: Boolean,
+        default: true,
+      },
+      webSearchEnabled: {
+        type: Boolean,
+        default: true,
+      },
+      completedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+    onboardingComplete: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
   },
   { timestamps: true }

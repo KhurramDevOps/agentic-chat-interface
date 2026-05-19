@@ -18,15 +18,12 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const verifyToken = require('../middleware/authMiddleware');
 
 const router = express.Router();
-
-function sha256(value) {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
 
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
@@ -35,7 +32,7 @@ const authLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.headers['x-test-client'] || req.ip || '127.0.0.1',
+  keyGenerator: (req) => req.headers['x-test-client'] || ipKeyGenerator(req.ip || '127.0.0.1'),
   message: { message: 'Too many requests, please try again later.' },
 });
 
@@ -48,6 +45,20 @@ const signupValidation = [
     .isLength({ min: 6 })
     .withMessage('Password must be at least 6 characters.'),
 ];
+
+const authJwtPayload = (user) => ({
+  userId: user._id.toString(),
+  id: user._id.toString(),
+  email: user.email,
+});
+
+const publicUser = (user) => ({
+  id: user._id.toString(),
+  name: user.name,
+  email: user.email,
+  onboardingComplete: Boolean(user.onboardingComplete || user.onboarding?.completed),
+  onboardingCompleted: Boolean(user.onboardingComplete || user.onboarding?.completed),
+});
 
 function handleValidation(req, res) {
   const errors = validationResult(req);
@@ -74,13 +85,58 @@ router.post('/signup', authLimiter, signupValidation, async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const user = new User({ name, email, password: hashedPassword });
+    const user = new User({
+      name,
+      email,
+      password: hashedPassword,
+      memory: { name, location: '', facts: [], lastUpdated: new Date() },
+    });
     await user.save();
 
     return res.status(201).json({ message: 'User registered successfully.' });
   } catch (err) {
     console.error('Signup error:', err.message);
     return res.status(500).json({ message: 'Server error during signup.' });
+  }
+});
+
+// ── POST /register ───────────────────────────────────────────────────────────
+
+router.post('/register', authLimiter, signupValidation, async (req, res) => {
+  const validationError = handleValidation(req, res);
+  if (validationError) return;
+
+  try {
+    const { name, email, password, confirmPassword } = req.body;
+
+    if (confirmPassword !== undefined && password !== confirmPassword) {
+      return res.status(400).json({ message: 'Passwords do not match' });
+    }
+
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(409).json({ message: 'Email already registered' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+    const user = new User({
+      name,
+      email: email.toLowerCase(),
+      password: hashedPassword,
+      memory: { name, location: '', facts: [], lastUpdated: new Date() },
+    });
+    await user.save();
+
+    const token = jwt.sign(
+      authJwtPayload(user),
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    return res.status(201).json({ token, user: publicUser(user) });
+  } catch (err) {
+    console.error('Register error:', err.message);
+    return res.status(400).json({ message: err.message });
   }
 });
 
@@ -96,26 +152,28 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password!' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid email or password!' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     // Access token — 1 hour, signed with JWT_SECRET
-    const token = jwt.sign(
-      { id: user._id.toString(), email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+    const token = jwt.sign(authJwtPayload(user), process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    // Refresh token — 7 days, signed with JWT_REFRESH_SECRET (separate secret)
+    const refreshToken = jwt.sign(
+      { id: user._id.toString() },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: '7d' }
     );
 
-    const refreshToken = crypto.randomBytes(64).toString('hex');
-    user.refreshToken = sha256(refreshToken);
+    user.refreshToken = refreshToken;
     await user.save();
 
-    return res.status(200).json({ token, refreshToken });
+    return res.status(200).json({ token, refreshToken, user: publicUser(user) });
   } catch (err) {
     console.error('Login error:', err.message);
     return res.status(500).json({ message: 'Server error during login.' });
@@ -127,7 +185,7 @@ router.post('/login', authLimiter, async (req, res) => {
 router.get('/me', verifyToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
-      .select('-password -passwordResetToken -passwordResetExpires -refreshToken');
+      .select('-password -resetToken -resetTokenExpiry -refreshToken');
     if (!user) return res.status(404).json({ message: 'User not found.' });
     return res.status(200).json(user);
   } catch (err) {
@@ -140,15 +198,25 @@ router.get('/me', verifyToken, async (req, res) => {
 
 router.put('/profile', verifyToken, async (req, res) => {
   try {
-    const { name, password } = req.body;
+    const { name, currentPassword, password } = req.body;
 
     if (!name && !password) {
       return res.status(400).json({ message: 'Provide at least one field to update.' });
     }
 
+    const userForPassword = await User.findById(req.user.id);
+    if (!userForPassword) return res.status(404).json({ message: 'User not found.' });
+
     const updates = {};
     if (name) updates.name = name.trim();
     if (password) {
+      if (!currentPassword) {
+        return res.status(400).json({ message: 'Current password is required to change password.' });
+      }
+      const currentPasswordValid = await bcrypt.compare(currentPassword, userForPassword.password);
+      if (!currentPasswordValid) {
+        return res.status(401).json({ message: 'Current password is incorrect.' });
+      }
       const salt = await bcrypt.genSalt(10);
       updates.password = await bcrypt.hash(password, salt);
     }
@@ -157,7 +225,7 @@ router.put('/profile', verifyToken, async (req, res) => {
       req.user.id,
       { $set: updates },
       { new: true }
-    ).select('-password -passwordResetToken -passwordResetExpires -refreshToken');
+    ).select('-password -resetToken -resetTokenExpiry -refreshToken');
 
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
@@ -179,9 +247,11 @@ router.post('/forgot-password', async (req, res) => {
     if (!user) return res.status(404).json({ message: 'No account found with that email.' });
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    user.passwordResetToken = sha256(resetToken);
-    user.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
     await user.save();
+
+    console.log(`[PASSWORD RESET] Token for ${email}: ${resetToken}`);
 
     return res.status(200).json({
       message: 'Password reset token generated. Check your email.',
@@ -200,7 +270,14 @@ router.post('/refresh', async (req, res) => {
     const { refreshToken } = req.body;
     if (!refreshToken) return res.status(401).json({ message: 'Refresh token is required.' });
 
-    const user = await User.findOne({ refreshToken: sha256(refreshToken) }).select('+refreshToken');
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    } catch {
+      return res.status(401).json({ message: 'Invalid or expired refresh token.' });
+    }
+
+    const user = await User.findOne({ _id: decoded.id, refreshToken });
     if (!user) return res.status(401).json({ message: 'Refresh token not recognised.' });
 
     const newAccessToken = jwt.sign(
@@ -226,15 +303,15 @@ router.post('/reset-password', async (req, res) => {
     }
 
     const user = await User.findOne({
-      passwordResetToken: sha256(resetToken),
-      passwordResetExpires: { $gt: new Date() },
-    }).select('+passwordResetToken');
+      resetToken,
+      resetTokenExpiry: { $gt: new Date() },
+    });
     if (!user) return res.status(400).json({ message: 'Invalid or expired reset token.' });
 
     const salt = await bcrypt.genSalt(10);
     user.password = await bcrypt.hash(newPassword, salt);
-    user.passwordResetToken = null;
-    user.passwordResetExpires = null;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
     await user.save();
 
     return res.status(200).json({ message: 'Password reset successfully.' });

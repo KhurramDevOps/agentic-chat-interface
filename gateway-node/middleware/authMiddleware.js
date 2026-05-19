@@ -33,13 +33,14 @@ const verifyToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (!decoded || !decoded.id) {
-      return res.status(401).json({ message: 'Invalid token payload' });
-    }
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      userId: decoded.userId || decoded.id,
+      id: decoded.id || decoded.userId,
+    };
     next();
   } catch (err) {
-    return res.status(401).json({ message: 'Invalid token' });
+    return res.status(401).json({ message: 'Unauthorized' });
   }
 };
 
