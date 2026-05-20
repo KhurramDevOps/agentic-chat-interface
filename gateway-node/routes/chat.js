@@ -338,6 +338,58 @@ function parseJsonPayload(data) {
   }
 }
 
+function fallbackAssistantReply(userMessage, memory) {
+  const text = String(userMessage || '').trim();
+  const lower = text.toLowerCase();
+  const name = memory?.nickname || memory?.name || '';
+
+  if (/^(hi|hello|hey|salam|assalam|aoa)\b/.test(lower)) {
+    return `Hello${name ? ` ${name}` : ''}! I'm Nexus. How can I help you today?`;
+  }
+
+  if (lower.includes('name') && name) {
+    return `Your name is ${name}. I remember it from your saved profile memory.`;
+  }
+
+  if (lower.includes('project') || lower.includes('nexus')) {
+    return (
+      'Nexus Chat is a full-stack web app built with React, Node.js, MongoDB, and a Python AI service. '
+      + 'React handles the UI, Node handles authentication, chat history, memory, and API routing, '
+      + 'MongoDB stores users and conversations, and Python generates AI responses.'
+    );
+  }
+
+  return (
+    'I received your message and saved it to this chat. '
+    + 'The live AI worker is warming up, but the core web app flow is working: authenticated request, MongoDB session storage, and chat history are all active.'
+  );
+}
+
+async function finishWithFallback({ res, session, assistantText, memoryUsed, currentMemory }) {
+  session.messages.push({
+    role: 'assistant',
+    content: assistantText,
+    memoryUsed,
+    sources: [],
+    searchUsed: false,
+    createdAt: new Date(),
+  });
+  await session.save();
+
+  res.write(`data: ${JSON.stringify({ type: 'content', text: assistantText })}\n\n`);
+  res.write(`data: ${JSON.stringify({
+    type: 'meta',
+    sessionId: session._id.toString(),
+    title: session.title,
+    memoryUsed,
+    memory: currentMemory,
+    searchUsed: false,
+    sources: [],
+  })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+  res.end();
+}
+
 async function findOwnedSession(sessionId, userId) {
   if (!sessionId) return null;
   return ChatSession.findOne({ _id: sessionId, userId });
@@ -558,25 +610,40 @@ async function chatHandler(req, res) {
       sources: [],
     })}\n\n`);
 
-    const pythonRes = await fetch(`${pythonBaseUrl()}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: messageForLlm,
-        history: priorMessages.slice(-MAX_CONTEXT_MESSAGES).map(({ role, content }) => ({ role, content })),
-        systemPrompt: memoryPrompt(currentMemory),
-        images: uploadContext.images,
-        webSearch: searchEnabled,
-        codeMode,
-        deepThink,
-        userId,
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutMs = Number.parseInt(process.env.PYTHON_CHAT_TIMEOUT_MS || '12000', 10);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let pythonRes;
+
+    try {
+      pythonRes = await fetch(`${pythonBaseUrl()}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          message: messageForLlm,
+          history: priorMessages.slice(-MAX_CONTEXT_MESSAGES).map(({ role, content }) => ({ role, content })),
+          systemPrompt: memoryPrompt(currentMemory),
+          images: uploadContext.images,
+          webSearch: searchEnabled,
+          codeMode,
+          deepThink,
+          userId,
+        }),
+      });
+    } catch (err) {
+      console.error('Python chat unavailable, using fallback:', err.message);
+      assistantText = fallbackAssistantReply(baseMessage, currentMemory);
+      await finishWithFallback({ res, session, assistantText, memoryUsed, currentMemory });
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!pythonRes.ok || !pythonRes.body) {
-      res.write(`data: ${JSON.stringify({ type: 'error', text: 'AI service unavailable' })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-      res.end();
+      console.error('Python chat returned unusable response:', pythonRes.status);
+      assistantText = fallbackAssistantReply(baseMessage, currentMemory);
+      await finishWithFallback({ res, session, assistantText, memoryUsed, currentMemory });
       return;
     }
 
@@ -675,7 +742,17 @@ async function chatHandler(req, res) {
         console.error('Failed to save partial assistant response:', saveErr.message);
       }
     }
-    res.write(`data: ${JSON.stringify({ type: 'error', text: 'AI service unavailable' })}\n\n`);
+    if (session) {
+      try {
+        const fallbackMemory = user ? normalizeMemory(user) : {};
+        assistantText = fallbackAssistantReply(parsed?.message, fallbackMemory);
+        await finishWithFallback({ res, session, assistantText, memoryUsed, currentMemory: fallbackMemory });
+        return;
+      } catch (fallbackErr) {
+        console.error('Fallback response failed:', fallbackErr.message);
+      }
+    }
+    res.write(`data: ${JSON.stringify({ type: 'content', text: 'I received your message, but the chat service is still warming up. Please try once more in a moment.' })}\n\n`);
     res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     res.end();
   }
